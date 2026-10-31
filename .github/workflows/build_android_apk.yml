@@ -82,7 +82,16 @@ jobs:
 
       - name: Prepare and Sign Standalone APK
         run: |
-          cp mobile/build/app/outputs/flutter-apk/app-release.apk SpotiPars.apk
+          APK_FILE=$(find mobile/build -name "*.apk" | grep -v "unaligned" | head -n 1)
+          echo "Found APK at: $APK_FILE"
+          if [ -z "$APK_FILE" ]; then
+            echo "Error: No APK file found in mobile/build!"
+            ls -la mobile/build || true
+            exit 1
+          fi
+          cp "$APK_FILE" SpotiPars.apk
+          ls -lh SpotiPars.apk
+
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
           if [ -z "$APKSIGNER" ]; then
             APKSIGNER=$(which apksigner || true)
