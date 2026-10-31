@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Build artifacts & compiled binaries (CRITICAL: GitHub rejects files > 100MB)
+dist/
+build/
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts & temporary media
+*.mp4
+*.mp3
+*.flac
+*.wav
+test_*.mp4
+
+# IDE & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+# Agent metadata / local cache
+.agents/
