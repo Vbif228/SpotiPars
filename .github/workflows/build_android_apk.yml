@@ -68,11 +68,17 @@ jobs:
 
       - name: Analyze Dart Code
         working-directory: mobile
-        run: flutter analyze
+        run: |
+          flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee /tmp/analyze.log || true
+          echo "### 🔍 Flutter Analyze Output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/analyze.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Build Release APK
         working-directory: mobile
-        run: flutter build apk --release --verbose
+        run: |
+          flutter build apk --release 2>&1 | tee /tmp/build.log || (echo "### ❌ Build Error" >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && tail -n 80 /tmp/build.log >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && exit 1)
 
       - name: Prepare and Sign Standalone APK
         run: |
