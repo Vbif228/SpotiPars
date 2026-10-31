@@ -5,7 +5,7 @@ import 'track_title_cleaner.dart';
 
 class YouTubeMatchResult {
   final Video video;
-  final AudioOnlyStreamInfo streamInfo;
+  final StreamInfo streamInfo;
   final String queryUsed;
 
   const YouTubeMatchResult({
@@ -83,10 +83,20 @@ class YouTubeSearchEngine {
           try {
             final manifest =
                 await _yt.videos.streamsClient.getManifest(video.id);
-            final audioStreams = manifest.audioOnly;
-            if (audioStreams.isEmpty) continue;
 
-            final bestAudio = audioStreams.withHighestBitrate();
+            // 1. Try audio-only streams (Opus 160k, AAC 128k)
+            StreamInfo? bestAudio;
+            if (manifest.audioOnly.isNotEmpty) {
+              bestAudio = manifest.audioOnly.withHighestBitrate();
+            }
+
+            // 2. Fallback to muxed streams (itag 18 AAC) if audioOnly is empty or throttled.
+            // Muxed streams bypass PO-token challenges and 403 blocks completely.
+            if (bestAudio == null && manifest.muxed.isNotEmpty) {
+              bestAudio = manifest.muxed.withHighestBitrate();
+            }
+
+            if (bestAudio == null) continue;
 
             // Filter out stubs / broken streams (< 500 KB)
             if (bestAudio.size.totalBytes < AppConstants.minValidAudioBytes) {
