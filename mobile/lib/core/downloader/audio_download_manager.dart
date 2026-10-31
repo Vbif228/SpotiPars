@@ -91,6 +91,20 @@ class AudioDownloadManager extends ChangeNotifier {
     notifyListeners();
   }
 
+  void retryTrack(TrackItem track) {
+    final idx = _queue.indexWhere((q) => q.track.id == track.id);
+    if (idx != -1) {
+      _queue[idx] = _queue[idx].copyWith(
+        status: DownloadStatus.queued,
+        statusMessage: 'В очереди (повтор)',
+        error: null,
+        progress: 0.0,
+      );
+      notifyListeners();
+      _processQueue();
+    }
+  }
+
   Future<void> _processQueue() async {
     if (_isProcessing) return;
     _isProcessing = true;

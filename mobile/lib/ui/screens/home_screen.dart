@@ -85,9 +85,73 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       );
     } catch (e) {
       if (!mounted) return;
+      final errorStr = e.toString();
       setState(() {
-        _errorMessage = 'Не удалось загрузить данные: $e';
+        _errorMessage = 'Сбой: $errorStr';
       });
+
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: SpotifyTheme.surface,
+          title: Row(
+            children: const [
+              Icon(Icons.error_outline, color: SpotifyTheme.error, size: 24),
+              SizedBox(width: 8),
+              Text(
+                'Сбой загрузки данных',
+                style: TextStyle(color: SpotifyTheme.textPrimary, fontSize: 16),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Не удалось получить метаданные по ссылке Spotify.',
+                style: TextStyle(color: SpotifyTheme.textSecondary, fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: SpotifyTheme.surfaceElevated,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+                ),
+                child: SelectableText(
+                  errorStr,
+                  style: const TextStyle(
+                    color: SpotifyTheme.error,
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Рекомендации:\n'
+                '• Убедитесь, что интернет работает на телефоне\n'
+                '• Если Spotify блокируется оператором, включите VPN\n'
+                '• Проверьте, что ссылка не из приватного плейлиста',
+                style: TextStyle(
+                  color: SpotifyTheme.textSecondary,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Понятно', style: TextStyle(color: SpotifyTheme.spotifyGreen)),
+            ),
+          ],
+        ),
+      );
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);

@@ -75,10 +75,9 @@ python -m unittest discover -s tests -p "test_*.py"
 - **Сохранение в MediaStore:** Треки сохраняются в папку `Music/SpotiPars` и сразу доступны во всех системных плеерах (Poweramp, AIMP, Samsung Music).
 - **Обход блокировок YouTube:** Каскадный поиск `lyrics` и `official audio`, фильтрация заглушек.
 
-### Как получить Android APK:
-1. Перейдите во вкладку [Actions](https://github.com/Vbif228/SpotiPars/actions) этого репозитория.
-2. Выберите последний успешный запуск **Build SpotiPars Android APK**.
-3. В блоке **Artifacts** скачайте готовый файл **`SpotiPars-Android-APK`** и установите на телефон!
+### 📥 Как скачать SpotiPars на телефон:
+- Прямая ссылка на готовый APK без архивов: **[Скачать SpotiPars.apk](https://github.com/Vbif228/SpotiPars/releases/download/latest/SpotiPars.apk)**
+- Либо перейдите в раздел [Releases](https://github.com/Vbif228/SpotiPars/releases) репозитория.
 
 ---
 

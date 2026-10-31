@@ -12,10 +12,15 @@ on:
       - 'mobile/**'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     name: Build Release APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Code
@@ -65,10 +70,31 @@ jobs:
         working-directory: mobile
         run: flutter build apk --release
 
+      - name: Prepare Clean Standalone APK
+        run: |
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk SpotiPars.apk
+
+      - name: Publish Direct SpotiPars.apk to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        with:
+          tag_name: latest
+          name: "SpotiPars Mobile (Android) Latest Release"
+          body: |
+            ## 📱 SpotiPars Mobile (Android)
+            
+            Прямая загрузка готового APK для смартфона без архивов:
+            - ⬇️ **[Скачать SpotiPars.apk](https://github.com/Vbif228/SpotiPars/releases/download/latest/SpotiPars.apk)**
+          files: SpotiPars.apk
+          prerelease: false
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SpotiPars-Android-APK
-          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+          path: SpotiPars.apk
           if-no-files-found: error
           retention-days: 30

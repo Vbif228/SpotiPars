@@ -177,7 +177,10 @@ class QueueScreen extends StatelessWidget {
                         itemCount: queue.length,
                         itemBuilder: (context, index) {
                           final item = queue[index];
-                          return DownloadProgressBar(item: item);
+                          return DownloadProgressBar(
+                            item: item,
+                            onRetry: () => downloadManager.retryTrack(item.track),
+                          );
                         },
                       ),
                     ),
