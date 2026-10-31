@@ -33,6 +33,14 @@ class QueueScreen extends StatelessWidget {
             title: const Text('Очередь загрузок'),
             actions: [
               if (queue.isNotEmpty) ...[
+                if (queue.any((i) =>
+                    i.status == DownloadStatus.failed ||
+                    i.status == DownloadStatus.cancelled))
+                  IconButton(
+                    tooltip: 'Повторить все ошибки',
+                    icon: const Icon(Icons.refresh, color: SpotifyTheme.spotifyGreen),
+                    onPressed: () => downloadManager.retryFailed(),
+                  ),
                 IconButton(
                   tooltip: 'Очистить завершенные',
                   icon: const Icon(Icons.cleaning_services_outlined),

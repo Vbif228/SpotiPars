@@ -16,9 +16,13 @@ class YouTubeMatchResult {
 }
 
 class YouTubeSearchEngine {
-  final YoutubeExplode _yt;
+  YoutubeExplode _yt;
 
   YouTubeSearchEngine({YoutubeExplode? yt}) : _yt = yt ?? YoutubeExplode();
+
+  void updateClient(YoutubeExplode yt) {
+    _yt = yt;
+  }
 
   /// Executes cascade search on YouTube and returns the best valid audio stream.
   Future<YouTubeMatchResult?> findBestAudioStream(
@@ -28,12 +32,14 @@ class YouTubeSearchEngine {
     final cleanTitle = TrackTitleCleaner.cleanTrackTitle(track.title);
     final artist = track.artist;
 
-    // Prioritized search queries
+    // Prioritized search queries:
+    // 1. Lyrics query: user uploads, NO YouTube Topic DRM / PO-Token restriction, original audio
+    // 2. Audio query
+    // 3. Artist + song
     final queries = [
-      '$artist - $cleanTitle official audio',
-      '$artist - $cleanTitle lyrics', // Bypass Topic DRM & PO-Token
+      '$artist - $cleanTitle lyrics',
       '$artist - $cleanTitle audio',
-      '$artist $cleanTitle song',
+      '$artist $cleanTitle',
     ];
 
     if (cleanTitle.toLowerCase() != track.title.toLowerCase()) {
@@ -42,25 +48,36 @@ class YouTubeSearchEngine {
 
     final visitedVideoIds = <String>{};
 
-    for (final query in queries) {
+    for (int qIdx = 0; qIdx < queries.length; qIdx++) {
+      final query = queries[qIdx];
+      if (qIdx > 0) {
+        // Polite delay between cascade queries to prevent rate-limiting
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+
       onStatusUpdate?.call('Поиск: "$query"...');
 
       try {
         final searchResults = await _yt.search.search(query);
         final candidates = searchResults.take(3).toList();
 
-        for (final video in candidates) {
+        for (int cIdx = 0; cIdx < candidates.length; cIdx++) {
+          final video = candidates[cIdx];
           if (visitedVideoIds.contains(video.id.value)) continue;
           visitedVideoIds.add(video.id.value);
 
-          // Verify video duration if track duration is known (avoid 10h loops or 15s snippets)
+          // Verify video duration if track duration is known (avoid 10h loops or snippets)
           if (track.durationMs > 0 && video.duration != null) {
             final trackSec = track.durationMs ~/ 1000;
             final videoSec = video.duration!.inSeconds;
-            // Reject if video is shorter than 20s or more than 2 minutes longer
-            if (videoSec < 20 || (videoSec - trackSec).abs() > 120) {
+            // Reject if video is shorter than 20s or duration differs by > 50s
+            if (videoSec < 20 || (videoSec - trackSec).abs() > 50) {
               continue;
             }
+          }
+
+          if (cIdx > 0) {
+            await Future.delayed(const Duration(milliseconds: 250));
           }
 
           try {
@@ -81,11 +98,17 @@ class YouTubeSearchEngine {
               streamInfo: bestAudio,
               queryUsed: query,
             );
+          } on RequestLimitExceededException {
+            // Rethrow so the download manager can back off and cool down
+            rethrow;
           } catch (_) {
-            // Video might have restrictions, continue cascade
+            // Video might have restrictions or DRM, continue cascade
             continue;
           }
         }
+      } on RequestLimitExceededException {
+        // Rethrow rate limit exception immediately
+        rethrow;
       } catch (_) {
         // Query failed, proceed to next query in cascade
         continue;

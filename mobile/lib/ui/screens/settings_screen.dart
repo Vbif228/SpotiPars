@@ -121,7 +121,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   },
                 ),
                 const Text(
-                  'Рекомендуется 2 потока для стабильной фоновой работы без троттлинга со стороны YouTube.',
+                  'Рекомендуется 1 поток для стабильной мобильной загрузки без блокировок YouTube (особенно при работе через VPN).',
                   style: TextStyle(
                     color: SpotifyTheme.textSecondary,
                     fontSize: 11,
