@@ -30,9 +30,23 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.5'
           channel: 'stable'
           cache: true
+
+      - name: Regenerate Native Android Project via Flutter
+        working-directory: mobile
+        run: |
+          mkdir -p /tmp/backup_manifest
+          cp android/app/src/main/AndroidManifest.xml /tmp/backup_manifest/AndroidManifest.xml
+          if [ -d "android/app/src/main/res/mipmap-hdpi" ]; then
+            cp -r android/app/src/main/res /tmp/backup_manifest/
+          fi
+          rm -rf android
+          flutter create . --platforms=android --org com.vbif228 --project-name spotipars
+          cp /tmp/backup_manifest/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          if [ -d "/tmp/backup_manifest/res" ]; then
+            cp -r /tmp/backup_manifest/res/* android/app/src/main/res/
+          fi
 
       - name: Install Mobile Dependencies
         working-directory: mobile
@@ -40,7 +54,7 @@ jobs:
 
       - name: Build Release APK
         working-directory: mobile
-        run: flutter build apk --release --android-skip-build-dependency-validation
+        run: flutter build apk --release
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

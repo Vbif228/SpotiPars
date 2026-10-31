@@ -1,4 +1,4 @@
-name: spotipars_mobile
+name: spotipars
 description: "A fast, modern Spotify to MP3/FLAC music downloader for Android."
 publish_to: 'none'
 version: 1.0.0+1
