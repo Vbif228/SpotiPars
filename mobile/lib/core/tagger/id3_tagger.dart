@@ -36,6 +36,24 @@ class Id3Tagger {
 
     final rawAudioBytes = await audioFile.readAsBytes();
 
+    // Guard against corrupting non-MP3 containers (MP4/M4A/AAC and WebM/Opus).
+    // Prepending raw ID3v2 tags to an MP4 container displaces the 'ftyp' atom and
+    // invalidates the 'stco' chunk offset table, rendering the file unplayable.
+    if (rawAudioBytes.length >= 8) {
+      final isMp4 = rawAudioBytes[4] == 0x66 && // 'f'
+          rawAudioBytes[5] == 0x74 && // 't'
+          rawAudioBytes[6] == 0x79 && // 'y'
+          rawAudioBytes[7] == 0x70; // 'p'
+      final isWebM = rawAudioBytes[0] == 0x1A &&
+          rawAudioBytes[1] == 0x45 &&
+          rawAudioBytes[2] == 0xDF &&
+          rawAudioBytes[3] == 0xA3;
+      if (isMp4 || isWebM) {
+        // Container is MP4 or WebM; keep container byte integrity intact.
+        return;
+      }
+    }
+
     // Check if file already has an ID3v2 tag at the start and strip it
     int audioStartIndex = 0;
     if (rawAudioBytes.length >= 10 &&

@@ -73,6 +73,7 @@ class AudioDownloadManager extends ChangeNotifier {
             track: track,
             status: DownloadStatus.queued,
             statusMessage: 'В очереди',
+            progress: 0.0,
           ),
         );
       }
@@ -88,6 +89,7 @@ class AudioDownloadManager extends ChangeNotifier {
         _queue[i] = _queue[i].copyWith(
           status: DownloadStatus.cancelled,
           statusMessage: 'Отменено',
+          progress: 0.0,
         );
       }
     }
@@ -166,23 +168,116 @@ class AudioDownloadManager extends ChangeNotifier {
         }
 
         final itemToDownload = _queue[nextIndex];
-        // Mark as searching immediately to prevent worker race conditions
         _queue[nextIndex] = itemToDownload.copyWith(
           status: DownloadStatus.searching,
           statusMessage: 'Подготовка к поиску...',
+          progress: 0.0,
         );
         notifyListeners();
 
-        // Launch download worker
         _downloadTrack(_queue[nextIndex]);
 
-        // Polite delay between launching tasks in queue to avoid rate limits
         await Future.delayed(const Duration(milliseconds: 1200));
       }
     } finally {
       _isProcessing = false;
       notifyListeners();
     }
+  }
+
+  /// Downloads a StreamInfo into a temp file with watchdog timeout.
+  /// Returns true if the downloaded file is complete and >= 500 KB.
+  Future<bool> _tryDownloadStreamToFile({
+    required StreamInfo streamInfo,
+    required File tempFile,
+    required void Function(double progress, int downloaded, int total) onProgress,
+  }) async {
+    if (_isCancelled) return false;
+
+    IOSink? fileSink;
+    try {
+      if (await tempFile.exists()) {
+        await tempFile.delete();
+      }
+      fileSink = tempFile.openWrite();
+
+      final totalBytes = streamInfo.size.totalBytes;
+      int downloadedBytes = 0;
+      int lastReportedPercent = -1;
+      int lastReportedTime = 0;
+      bool receivedFirstChunk = false;
+
+      final rawStream = _ytClient.videos.streamsClient.get(streamInfo);
+
+      // Fast watchdog timeout: if no chunks arrive in 10s (e.g. 403 freeze),
+      // throw TimeoutException so we immediately switch to the next stream candidate.
+      final timedStream = rawStream.timeout(
+        const Duration(seconds: 10),
+        onTimeout: (sink) {
+          sink.addError(
+            TimeoutException('Таймаут ожидания данных от потока YouTube'),
+          );
+        },
+      );
+
+      await for (final chunk in timedStream) {
+        if (_isCancelled) {
+          try {
+            await fileSink.close();
+          } catch (_) {}
+          if (await tempFile.exists()) await tempFile.delete();
+          return false;
+        }
+
+        if (chunk.isEmpty) continue;
+        receivedFirstChunk = true;
+
+        fileSink.add(chunk);
+        downloadedBytes += chunk.length;
+
+        final double progress = totalBytes > 0
+            ? (0.05 + (downloadedBytes / totalBytes) * 0.90).clamp(0.05, 0.95)
+            : 0.5;
+
+        final percent = (progress * 100).toInt();
+        final now = DateTime.now().millisecondsSinceEpoch;
+
+        if ((percent != lastReportedPercent && (now - lastReportedTime >= 100)) ||
+            percent == 95) {
+          lastReportedPercent = percent;
+          lastReportedTime = now;
+          onProgress(progress, downloadedBytes, totalBytes);
+        }
+      }
+
+      await fileSink.flush();
+      await fileSink.close();
+      fileSink = null;
+
+      if (!receivedFirstChunk) {
+        return false;
+      }
+
+      final finalSize = await tempFile.length();
+      if (finalSize >= AppConstants.minValidAudioBytes) {
+        return true;
+      }
+    } catch (e) {
+      debugPrint('Stream download attempt (tag ${streamInfo.tag}) failed: $e');
+    } finally {
+      if (fileSink != null) {
+        try {
+          await fileSink.close();
+        } catch (_) {}
+      }
+    }
+
+    if (await tempFile.exists()) {
+      try {
+        await tempFile.delete();
+      } catch (_) {}
+    }
+    return false;
   }
 
   Future<void> _downloadTrack(DownloadItem item) async {
@@ -237,6 +332,7 @@ class AudioDownloadManager extends ChangeNotifier {
 
       int attempt = 0;
       const maxAttempts = 3;
+      final failedVideoIds = <String>{};
 
       while (attempt < maxAttempts) {
         attempt++;
@@ -244,7 +340,11 @@ class AudioDownloadManager extends ChangeNotifier {
 
         try {
           if (_isCancelled) {
-            updateStatus(status: DownloadStatus.cancelled, message: 'Отменено');
+            updateStatus(
+              status: DownloadStatus.cancelled,
+              message: 'Отменено',
+              progress: 0.0,
+            );
             return;
           }
 
@@ -252,14 +352,20 @@ class AudioDownloadManager extends ChangeNotifier {
           updateStatus(
             status: DownloadStatus.searching,
             message: attempt > 1
-                ? 'Повторный поиск аудио на YouTube ($attempt/$maxAttempts)...'
+                ? 'Повторный поиск другого видео ($attempt/$maxAttempts)...'
                 : 'Поиск лучшего аудио на YouTube...',
+            progress: 0.02,
           );
 
           final match = await _searchEngine.findBestAudioStream(
             track,
+            excludedVideoIds: failedVideoIds,
             onStatusUpdate: (msg) {
-              updateStatus(status: DownloadStatus.searching, message: msg);
+              updateStatus(
+                status: DownloadStatus.searching,
+                message: msg,
+                progress: 0.02,
+              );
             },
           );
 
@@ -267,17 +373,23 @@ class AudioDownloadManager extends ChangeNotifier {
             updateStatus(
               status: DownloadStatus.failed,
               message: 'Не найден подходящий трек на YouTube',
-              error: 'Не удалось найти подходящий аудиопоток для "${track.artist} - ${track.title}"',
+              progress: 0.0,
+              error:
+                  'Не удалось найти подходящий аудиопоток для "${track.artist} - ${track.title}"',
             );
             return;
           }
 
           if (_isCancelled) {
-            updateStatus(status: DownloadStatus.cancelled, message: 'Отменено');
+            updateStatus(
+              status: DownloadStatus.cancelled,
+              message: 'Отменено',
+              progress: 0.0,
+            );
             return;
           }
 
-          // 4. Download Stream to Temp File
+          // 4. Download Stream to Temp File (Cascade over candidate streams: muxed itag 18 -> audioOnly)
           updateStatus(
             status: DownloadStatus.downloading,
             message: 'Подключение к аудиопотоку...',
@@ -287,87 +399,71 @@ class AudioDownloadManager extends ChangeNotifier {
           final tempDir = await getTemporaryDirectory();
           tempFile = File(p.join(
             tempDir.path,
-            'tmp_${track.trackNumber}_${DateTime.now().millisecondsSinceEpoch}.${_audioFormat}',
+            'tmp_${track.trackNumber}_${DateTime.now().millisecondsSinceEpoch}.$_audioFormat',
           ));
 
-          final stream = _ytClient.videos.streamsClient.get(match.streamInfo);
-          final fileSink = tempFile.openWrite();
+          bool downloadedSuccessfully = false;
+          final allCandidateStreams = match.allStreams;
 
-          final totalBytes = match.streamInfo.size.totalBytes;
-          int downloadedBytes = 0;
-          int lastReportedPercent = -1;
-          int lastReportedTime = 0;
-
-          // Apply a 25-second inactivity timeout to prevent frozen downloads
-          final streamWithTimeout = stream.timeout(
-            const Duration(seconds: 25),
-            onTimeout: (sink) {
-              sink.addError(
-                TimeoutException('Таймаут передачи аудиопотока YouTube (25 сек)'),
+          for (int sIdx = 0; sIdx < allCandidateStreams.length; sIdx++) {
+            if (_isCancelled) {
+              updateStatus(
+                status: DownloadStatus.cancelled,
+                message: 'Отменено',
+                progress: 0.0,
               );
-            },
-          );
+              return;
+            }
 
-          try {
-            await for (final chunk in streamWithTimeout) {
-              if (_isCancelled) {
-                await fileSink.flush();
-                await fileSink.close();
-                if (await tempFile.exists()) await tempFile.delete();
-                updateStatus(
-                  status: DownloadStatus.cancelled,
-                  message: 'Отменено',
-                );
-                return;
-              }
+            final candidateStream = allCandidateStreams[sIdx];
+            if (sIdx > 0) {
+              updateStatus(
+                status: DownloadStatus.downloading,
+                message:
+                    'Переключение на резервный поток (${sIdx + 1}/${allCandidateStreams.length})...',
+                progress: 0.05,
+              );
+            }
 
-              fileSink.add(chunk);
-              downloadedBytes += chunk.length;
-
-              final double progress = totalBytes > 0
-                  ? (downloadedBytes / totalBytes).clamp(0.0, 0.95)
-                  : 0.5;
-
-              final percent = (progress * 100).toInt();
-              final now = DateTime.now().millisecondsSinceEpoch;
-
-              // Throttle UI progress updates to avoid flooding main isolate (smooth 60/120 FPS)
-              if ((percent != lastReportedPercent && (now - lastReportedTime >= 100)) ||
-                  percent == 95) {
-                lastReportedPercent = percent;
-                lastReportedTime = now;
+            downloadedSuccessfully = await _tryDownloadStreamToFile(
+              streamInfo: candidateStream,
+              tempFile: tempFile,
+              onProgress: (progress, downloaded, total) {
+                final percent = (progress * 100).toInt();
                 updateStatus(
                   status: DownloadStatus.downloading,
                   message: 'Скачивание $percent%...',
                   progress: progress,
-                  downloaded: downloadedBytes,
-                  total: totalBytes,
+                  downloaded: downloaded,
+                  total: total,
                 );
-              }
-            }
-
-            await fileSink.flush();
-            await fileSink.close();
-          } catch (streamErr) {
-            await fileSink.flush();
-            await fileSink.close();
-            if (await tempFile.exists()) await tempFile.delete();
-            rethrow;
-          }
-
-          // Verify file size
-          final finalTempSize = await tempFile.length();
-          if (finalTempSize < AppConstants.minValidAudioBytes) {
-            if (await tempFile.exists()) await tempFile.delete();
-            updateStatus(
-              status: DownloadStatus.failed,
-              message: 'Файл слишком мал (заглушка)',
-              error: 'Stream size < 500 KB',
+              },
             );
-            return;
+
+            if (downloadedSuccessfully) {
+              break;
+            }
           }
 
-          // 5. Ingest ID3v2 Tags and Album Cover
+          // If all streams of this video fail, black-list the video and try next candidate on retry
+          if (!downloadedSuccessfully) {
+            failedVideoIds.add(match.video.id.value);
+            if (attempt < maxAttempts && !_isCancelled) {
+              _resetYtClient();
+              continue;
+            } else {
+              updateStatus(
+                status: DownloadStatus.failed,
+                message: 'Ошибка скачивания аудиопотока (403 / таймаут)',
+                progress: 0.0,
+                error:
+                    'Все потоки видео (${match.video.id.value}) оказались недоступны или заблокированы.',
+              );
+              return;
+            }
+          }
+
+          // 5. Ingest ID3v2 Tags and Album Cover (Safe against corrupting MP4 containers)
           updateStatus(
             status: DownloadStatus.tagging,
             message: 'Вшивка тегов и обложки...',
@@ -418,7 +514,9 @@ class AudioDownloadManager extends ChangeNotifier {
           if (attempt < maxAttempts && !_isCancelled) {
             updateStatus(
               status: DownloadStatus.searching,
-              message: 'Лимит YouTube (429). Пауза 8с перед повтором ($attempt/$maxAttempts)...',
+              message:
+                  'Лимит YouTube (429). Пауза 8с перед повтором ($attempt/$maxAttempts)...',
+              progress: 0.0,
             );
             _resetYtClient();
             await Future.delayed(const Duration(seconds: 8));
@@ -427,12 +525,14 @@ class AudioDownloadManager extends ChangeNotifier {
             updateStatus(
               status: DownloadStatus.failed,
               message: 'Лимит запросов YouTube (429)',
-              error: 'YouTube временно ограничил запросы с вашего IP адреса (Rate Limit / 429).\n\n'
-                     'РЕКОМЕНДАЦИИ ДЛЯ РЕШЕНИЯ:\n'
-                     '1. Если у вас включен VPN (значок ключа вверху экрана) — обязательно отключите его или смените сервер. Серверы YouTube строго блокируют общедоступные IP-адреса VPN.\n'
-                     '2. Подождите 1–2 минуты для сброса счетчика запросов YouTube.\n'
-                     '3. Нажмите кнопку «Повторить» или иконку обновления в шапке очереди.\n\n'
-                     'Технические данные:\n$e',
+              progress: 0.0,
+              error:
+                  'YouTube временно ограничил запросы с вашего IP адреса (Rate Limit / 429).\n\n'
+                  'РЕКОМЕНДАЦИИ ДЛЯ РЕШЕНИЯ:\n'
+                  '1. Если у вас включен VPN (значок ключа вверху экрана) — обязательно отключите его или смените сервер. Серверы YouTube строго блокируют общедоступные IP-адреса VPN.\n'
+                  '2. Подождите 1–2 минуты для сброса счетчика запросов YouTube.\n'
+                  '3. Нажмите кнопку «Повторить» или иконку обновления в шапке очереди.\n\n'
+                  'Технические данные:\n$e',
             );
             return;
           }
@@ -450,7 +550,9 @@ class AudioDownloadManager extends ChangeNotifier {
               !_isCancelled) {
             updateStatus(
               status: DownloadStatus.searching,
-              message: 'Сбой соединения. Пауза 3с перед повтором ($attempt/$maxAttempts)...',
+              message:
+                  'Сбой соединения. Пауза 3с перед повтором ($attempt/$maxAttempts)...',
+              progress: 0.0,
             );
             await Future.delayed(const Duration(seconds: 3));
             continue;
@@ -459,6 +561,7 @@ class AudioDownloadManager extends ChangeNotifier {
           updateStatus(
             status: DownloadStatus.failed,
             message: 'Ошибка: $e',
+            progress: 0.0,
             error: e.toString(),
           );
           return;
@@ -468,6 +571,7 @@ class AudioDownloadManager extends ChangeNotifier {
       updateStatus(
         status: DownloadStatus.failed,
         message: 'Ошибка: $outerErr',
+        progress: 0.0,
         error: outerErr.toString(),
       );
     }
