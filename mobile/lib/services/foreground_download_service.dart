@@ -1,6 +1,6 @@
 import 'dart:io';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import '../constants/app_constants.dart';
+import '../core/constants/app_constants.dart';
 
 class ForegroundDownloadService {
   static bool _isInitialized = false;
