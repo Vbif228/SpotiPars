@@ -47,6 +47,15 @@ jobs:
           if [ -d "/tmp/backup_manifest/res" ]; then
             cp -r /tmp/backup_manifest/res/* android/app/src/main/res/
           fi
+          python3 -c "
+          import glob, re
+          for p in glob.glob('android/app/build.gradle*'):
+              with open(p, 'r') as f: c = f.read()
+              c = re.sub(r'compileSdk(Version)?\s*=?\s*[\w.]+', 'compileSdk = 37', c)
+              with open(p, 'w') as f: f.write(c)
+          "
+          echo "=== Updated compileSdk in build.gradle: ==="
+          grep -E "compileSdk" android/app/build.gradle* || true
 
       - name: Install Mobile Dependencies
         working-directory: mobile
