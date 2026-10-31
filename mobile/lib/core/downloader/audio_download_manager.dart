@@ -243,6 +243,8 @@ class AudioDownloadManager extends ChangeNotifier {
 
       final totalBytes = match.streamInfo.size.totalBytes;
       int downloadedBytes = 0;
+      int lastReportedPercent = -1;
+      int lastReportedTime = 0;
 
       await for (final chunk in stream) {
         if (_isCancelled) {
@@ -264,13 +266,20 @@ class AudioDownloadManager extends ChangeNotifier {
             : 0.5;
 
         final percent = (progress * 100).toInt();
-        updateStatus(
-          status: DownloadStatus.downloading,
-          message: 'Скачивание $percent%...',
-          progress: progress,
-          downloaded: downloadedBytes,
-          total: totalBytes,
-        );
+        final now = DateTime.now().millisecondsSinceEpoch;
+
+        // Throttle UI progress updates to avoid flooding main isolate (smooth 60/120 FPS)
+        if ((percent != lastReportedPercent && (now - lastReportedTime >= 100)) || percent == 95) {
+          lastReportedPercent = percent;
+          lastReportedTime = now;
+          updateStatus(
+            status: DownloadStatus.downloading,
+            message: 'Скачивание $percent%...',
+            progress: progress,
+            downloaded: downloadedBytes,
+            total: totalBytes,
+          );
+        }
       }
 
       await fileSink.flush();

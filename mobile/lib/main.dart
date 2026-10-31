@@ -53,6 +53,15 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
   final ShareIntentReceiver _intentReceiver = ShareIntentReceiver();
   final SpotifyScraper _scraper = SpotifyScraper();
 
+  late final List<Widget> _screens = [
+    HomeScreen(
+      downloadManager: _downloadManager,
+      onNavigateToQueue: () => setState(() => _currentIndex = 1),
+    ),
+    QueueScreen(downloadManager: _downloadManager),
+    SettingsScreen(downloadManager: _downloadManager),
+  ];
+
   @override
   void initState() {
     super.initState();
@@ -117,62 +126,64 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _downloadManager,
-      builder: (context, _) {
-        final activeCount = _downloadManager.queue
-            .where((i) =>
-                i.status == DownloadStatus.downloading ||
-                i.status == DownloadStatus.searching ||
-                i.status == DownloadStatus.tagging ||
-                i.status == DownloadStatus.queued)
-            .length;
-
-        final screens = [
-          HomeScreen(
-            downloadManager: _downloadManager,
-            onNavigateToQueue: () => setState(() => _currentIndex = 1),
+    return Scaffold(
+      body: IndexedStack(
+        index: _currentIndex,
+        children: _screens,
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
+        destinations: [
+          const NavigationDestination(
+            icon: Icon(Icons.search),
+            selectedIcon: Icon(Icons.search, color: SpotifyTheme.spotifyGreen),
+            label: 'Поиск',
           ),
-          QueueScreen(downloadManager: _downloadManager),
-          SettingsScreen(downloadManager: _downloadManager),
-        ];
-
-        return Scaffold(
-          body: IndexedStack(
-            index: _currentIndex,
-            children: screens,
-          ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _currentIndex,
-            onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
-            destinations: [
-              const NavigationDestination(
-                icon: Icon(Icons.search),
-                selectedIcon: Icon(Icons.search, color: SpotifyTheme.spotifyGreen),
-                label: 'Поиск',
-              ),
-              NavigationDestination(
-                icon: Badge(
+          NavigationDestination(
+            icon: AnimatedBuilder(
+              animation: _downloadManager,
+              builder: (_, __) {
+                final activeCount = _downloadManager.queue
+                    .where((i) =>
+                        i.status == DownloadStatus.downloading ||
+                        i.status == DownloadStatus.searching ||
+                        i.status == DownloadStatus.tagging ||
+                        i.status == DownloadStatus.queued)
+                    .length;
+                return Badge(
                   isLabelVisible: activeCount > 0,
                   label: Text('$activeCount'),
                   child: const Icon(Icons.download),
-                ),
-                selectedIcon: Badge(
+                );
+              },
+            ),
+            selectedIcon: AnimatedBuilder(
+              animation: _downloadManager,
+              builder: (_, __) {
+                final activeCount = _downloadManager.queue
+                    .where((i) =>
+                        i.status == DownloadStatus.downloading ||
+                        i.status == DownloadStatus.searching ||
+                        i.status == DownloadStatus.tagging ||
+                        i.status == DownloadStatus.queued)
+                    .length;
+                return Badge(
                   isLabelVisible: activeCount > 0,
                   label: Text('$activeCount'),
                   child: const Icon(Icons.download, color: SpotifyTheme.spotifyGreen),
-                ),
-                label: 'Очередь',
-              ),
-              const NavigationDestination(
-                icon: Icon(Icons.settings),
-                selectedIcon: Icon(Icons.settings, color: SpotifyTheme.spotifyGreen),
-                label: 'Настройки',
-              ),
-            ],
+                );
+              },
+            ),
+            label: 'Очередь',
           ),
-        );
-      },
+          const NavigationDestination(
+            icon: Icon(Icons.settings),
+            selectedIcon: Icon(Icons.settings, color: SpotifyTheme.spotifyGreen),
+            label: 'Настройки',
+          ),
+        ],
+      ),
     );
   }
 }
