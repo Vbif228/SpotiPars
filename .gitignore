@@ -35,3 +35,13 @@ Desktop.ini
 
 # Agent metadata / local cache
 .agents/
+
+# Flutter & Android build artifacts
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/android/.gradle/
+**/android/local.properties
+**/mobile/build/
+**/mobile/.dart_tool/
+
