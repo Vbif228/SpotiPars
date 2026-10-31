@@ -56,7 +56,7 @@ jobs:
           import glob, re
           for p in glob.glob('android/app/build.gradle*'):
               with open(p, 'r') as f: c = f.read()
-              c = re.sub(r'compileSdk(Version)?\s*=?\s*[\w.]+', 'compileSdk = 37', c)
+              c = re.sub(r'compileSdk(Version)?\s*=?\s*[\w.]+', 'compileSdk = 34', c)
               with open(p, 'w') as f: f.write(c)
           "
           echo "=== Updated compileSdk in build.gradle: ==="
@@ -66,30 +66,19 @@ jobs:
         working-directory: mobile
         run: flutter pub get
 
-      - name: Analyze Dart Code
-        working-directory: mobile
-        run: |
-          flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee /tmp/analyze.log || true
-          echo "### 🔍 Flutter Analyze Output" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat /tmp/analyze.log >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-
       - name: Build Release APK
         working-directory: mobile
         run: |
-          flutter build apk --release 2>&1 | tee /tmp/build.log || (echo "### ❌ Build Error" >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && tail -n 80 /tmp/build.log >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && exit 1)
+          flutter build apk --release > /tmp/build.log 2>&1 || {
+            BUILD_STATUS=$?
+            echo "=== ❌ FLUTTER BUILD FAILED (exit code $BUILD_STATUS) ==="
+            tail -n 120 /tmp/build.log
+            exit $BUILD_STATUS
+          }
 
       - name: Prepare and Sign Standalone APK
         run: |
-          APK_FILE=$(find mobile/build -name "*.apk" | grep -v "unaligned" | head -n 1)
-          echo "Found APK at: $APK_FILE"
-          if [ -z "$APK_FILE" ]; then
-            echo "Error: No APK file found in mobile/build!"
-            ls -la mobile/build || true
-            exit 1
-          fi
-          cp "$APK_FILE" SpotiPars.apk
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk SpotiPars.apk
           ls -lh SpotiPars.apk
 
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
