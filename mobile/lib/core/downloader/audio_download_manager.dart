@@ -397,10 +397,11 @@ class AudioDownloadManager extends ChangeNotifier {
           );
 
           final tempDir = await getTemporaryDirectory();
-          tempFile = File(p.join(
+          final createdTempFile = File(p.join(
             tempDir.path,
             'tmp_${track.trackNumber}_${DateTime.now().millisecondsSinceEpoch}.$_audioFormat',
           ));
+          tempFile = createdTempFile;
 
           bool downloadedSuccessfully = false;
           final allCandidateStreams = match.allStreams;
@@ -427,7 +428,7 @@ class AudioDownloadManager extends ChangeNotifier {
 
             downloadedSuccessfully = await _tryDownloadStreamToFile(
               streamInfo: candidateStream,
-              tempFile: tempFile,
+              tempFile: createdTempFile,
               onProgress: (progress, downloaded, total) {
                 final percent = (progress * 100).toInt();
                 updateStatus(
@@ -471,7 +472,7 @@ class AudioDownloadManager extends ChangeNotifier {
           );
 
           try {
-            await _tagger.tagMp3File(tempFile, track);
+            await _tagger.tagMp3File(createdTempFile, track);
           } catch (e) {
             debugPrint('Tagging non-critical warning: $e');
           }
@@ -490,9 +491,9 @@ class AudioDownloadManager extends ChangeNotifier {
           if (await finalTargetFile.exists()) {
             await finalTargetFile.delete();
           }
-          await tempFile.copy(finalTargetFile.path);
-          if (await tempFile.exists()) {
-            await tempFile.delete();
+          await createdTempFile.copy(finalTargetFile.path);
+          if (await createdTempFile.exists()) {
+            await createdTempFile.delete();
           }
 
           updateStatus(

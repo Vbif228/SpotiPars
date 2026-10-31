@@ -56,7 +56,7 @@ jobs:
           import glob, re
           for p in glob.glob('android/app/build.gradle*'):
               with open(p, 'r') as f: c = f.read()
-              c = re.sub(r'compileSdk(Version)?\s*=?\s*[\w.]+', 'compileSdk = 34', c)
+              c = re.sub(r'compileSdk(Version)?\s*=?\s*[\w.]+', 'compileSdk = 37', c)
               with open(p, 'w') as f: f.write(c)
           "
           echo "=== Updated compileSdk in build.gradle: ==="
@@ -68,19 +68,11 @@ jobs:
 
       - name: Build Release APK
         working-directory: mobile
-        run: |
-          flutter build apk --release > /tmp/build.log 2>&1 || {
-            BUILD_STATUS=$?
-            echo "=== ❌ FLUTTER BUILD FAILED (exit code $BUILD_STATUS) ==="
-            tail -n 120 /tmp/build.log
-            exit $BUILD_STATUS
-          }
+        run: flutter build apk --release
 
       - name: Prepare and Sign Standalone APK
         run: |
           cp mobile/build/app/outputs/flutter-apk/app-release.apk SpotiPars.apk
-          ls -lh SpotiPars.apk
-
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
           if [ -z "$APKSIGNER" ]; then
             APKSIGNER=$(which apksigner || true)
