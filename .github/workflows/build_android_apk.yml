@@ -70,9 +70,22 @@ jobs:
         working-directory: mobile
         run: flutter build apk --release
 
-      - name: Prepare Clean Standalone APK
+      - name: Prepare and Sign Standalone APK
         run: |
           cp mobile/build/app/outputs/flutter-apk/app-release.apk SpotiPars.apk
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
+          if [ -z "$APKSIGNER" ]; then
+            APKSIGNER=$(which apksigner || true)
+          fi
+          echo "Found apksigner at: $APKSIGNER"
+          if [ -n "$APKSIGNER" ]; then
+            $APKSIGNER sign --ks mobile/release.jks --ks-pass pass:spotiparspass --ks-key-alias spotipars --key-pass pass:spotiparspass --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true SpotiPars.apk
+            echo "=== APK Signature Verification: ==="
+            $APKSIGNER verify --verbose SpotiPars.apk
+          else
+            echo "Warning: apksigner not found, falling back to jarsigner"
+            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 -keystore mobile/release.jks -storepass spotiparspass -keypass spotiparspass SpotiPars.apk spotipars
+          fi
 
       - name: Publish Direct SpotiPars.apk to GitHub Releases
         uses: softprops/action-gh-release@v2
