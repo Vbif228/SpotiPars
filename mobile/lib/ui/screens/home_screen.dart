@@ -3,13 +3,21 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/app_constants.dart';
+import '../../core/downloader/audio_download_manager.dart';
 import '../../core/spotify/spotify_scraper.dart';
 import '../theme/spotify_theme.dart';
 import '../widgets/format_selector_chips.dart';
 import 'preview_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
-  const HomeScreen({Key? key}) : super(key: key);
+  final AudioDownloadManager? downloadManager;
+  final VoidCallback? onNavigateToQueue;
+
+  const HomeScreen({
+    Key? key,
+    this.downloadManager,
+    this.onNavigateToQueue,
+  }) : super(key: key);
 
   @override
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
@@ -70,6 +78,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             playlistInfo: playlistInfo,
             audioFormat: _selectedFormat,
             createSubfolder: _createSubfolder,
+            downloadManager: widget.downloadManager ?? AudioDownloadManager.instance,
+            onStartDownload: widget.onNavigateToQueue,
           ),
         ),
       );

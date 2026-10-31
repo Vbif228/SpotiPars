@@ -1,20 +1,32 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../constants/app_constants.dart';
 import '../youtube/track_title_cleaner.dart';
 
 class MediaStoreHelper {
-  /// Resolves the default target directory for downloaded tracks.
-  /// On Android, resolves to `/storage/emulated/0/Music/SpotiPars`.
+  /// Resolves the target directory for downloaded tracks.
+  /// On Android, attempts to write to `/storage/emulated/0/Music/SpotiPars`,
+  /// with a graceful fallback to external app storage if system permissions restrict it.
   static Future<Directory> getMusicDirectory({String subFolder = ''}) async {
     Directory baseDir;
 
     if (Platform.isAndroid) {
-      final standardMusicDir = Directory('/storage/emulated/0/Music');
-      if (await standardMusicDir.exists()) {
-        baseDir = standardMusicDir;
-      } else {
+      try {
+        final standardMusicDir = Directory('/storage/emulated/0/Music');
+        if (await standardMusicDir.exists()) {
+          final spotiparsFolder = Directory(p.join(standardMusicDir.path, 'SpotiPars'));
+          if (!await spotiparsFolder.exists()) {
+            await spotiparsFolder.create(recursive: true);
+          }
+          baseDir = standardMusicDir;
+        } else {
+          final extDir = await getExternalStorageDirectory();
+          baseDir = extDir ?? await getApplicationDocumentsDirectory();
+        }
+      } catch (e) {
+        debugPrint('Fallback storage used due to: $e');
         final extDir = await getExternalStorageDirectory();
         baseDir = extDir ?? await getApplicationDocumentsDirectory();
       }

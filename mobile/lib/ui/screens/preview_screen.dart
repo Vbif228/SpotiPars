@@ -11,6 +11,7 @@ class PreviewScreen extends StatefulWidget {
   final String audioFormat;
   final bool createSubfolder;
   final AudioDownloadManager? downloadManager;
+  final VoidCallback? onStartDownload;
 
   const PreviewScreen({
     Key? key,
@@ -18,6 +19,7 @@ class PreviewScreen extends StatefulWidget {
     required this.audioFormat,
     required this.createSubfolder,
     this.downloadManager,
+    this.onStartDownload,
   }) : super(key: key);
 
   @override
@@ -62,24 +64,27 @@ class _PreviewScreenState extends State<PreviewScreen> {
       return;
     }
 
-    final manager = widget.downloadManager;
-    if (manager != null) {
-      manager.configure(
-        audioFormat: widget.audioFormat,
-        subFolder: widget.createSubfolder ? widget.playlistInfo.title : '',
-      );
-      manager.addTracks(selected);
+    final manager = widget.downloadManager ?? AudioDownloadManager.instance;
+    manager.configure(
+      audioFormat: widget.audioFormat,
+      subFolder: widget.createSubfolder ? widget.playlistInfo.title : '',
+    );
+    manager.addTracks(selected);
 
-      // Start foreground service for background execution
+    try {
       await ForegroundDownloadService.startForeground(
         title: 'SpotiPars: Загрузка треков',
         text: 'Скачивание ${selected.length} треков...',
       );
+    } catch (e) {
+      debugPrint('Foreground download service start failed: $e');
     }
 
     if (!mounted) return;
 
     Navigator.pop(context);
+    widget.onStartDownload?.call();
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('Добавлено в очередь: ${selected.length} треков'),

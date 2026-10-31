@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'core/downloader/audio_download_manager.dart';
 import 'core/models/download_item.dart';
@@ -56,12 +57,27 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
   void initState() {
     super.initState();
 
+    // Request permissions on startup
+    _requestAppPermissions();
+
     // Listen for incoming links from Android 'Share' menu in Spotify
     _intentReceiver.initialize(
       onLinkReceived: (url) {
         _handleSharedLink(url);
       },
     );
+  }
+
+  Future<void> _requestAppPermissions() async {
+    try {
+      await [
+        Permission.notification,
+        Permission.storage,
+        Permission.audio,
+      ].request();
+    } catch (e) {
+      debugPrint('Permission request notice: $e');
+    }
   }
 
   Future<void> _handleSharedLink(String url) async {
@@ -77,6 +93,7 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
             audioFormat: _downloadManager.audioFormat,
             createSubfolder: true,
             downloadManager: _downloadManager,
+            onStartDownload: () => setState(() => _currentIndex = 1),
           ),
         ),
       );
@@ -112,7 +129,10 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
             .length;
 
         final screens = [
-          const HomeScreen(),
+          HomeScreen(
+            downloadManager: _downloadManager,
+            onNavigateToQueue: () => setState(() => _currentIndex = 1),
+          ),
           QueueScreen(downloadManager: _downloadManager),
           SettingsScreen(downloadManager: _downloadManager),
         ];

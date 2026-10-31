@@ -16,11 +16,15 @@ import '../youtube/youtube_search_engine.dart';
 typedef DownloadProgressCallback = void Function(List<DownloadItem> items);
 
 class AudioDownloadManager extends ChangeNotifier {
+  static final AudioDownloadManager instance = AudioDownloadManager._internal();
+
+  factory AudioDownloadManager() => instance;
+
   final YouTubeSearchEngine _searchEngine;
   final Id3Tagger _tagger;
   final YoutubeExplode _ytClient;
 
-  AudioDownloadManager({
+  AudioDownloadManager._internal({
     YouTubeSearchEngine? searchEngine,
     Id3Tagger? tagger,
     YoutubeExplode? ytClient,
@@ -111,7 +115,6 @@ class AudioDownloadManager extends ChangeNotifier {
         );
 
         if (nextIndex == -1) {
-          // No more queued items
           if (activeDownloads == 0) {
             break;
           }
@@ -120,8 +123,15 @@ class AudioDownloadManager extends ChangeNotifier {
         }
 
         final itemToDownload = _queue[nextIndex];
-        // Start downloading in background worker
-        _downloadTrack(itemToDownload);
+        // Mark as searching immediately to prevent worker race conditions
+        _queue[nextIndex] = itemToDownload.copyWith(
+          status: DownloadStatus.searching,
+          statusMessage: 'Подготовка к поиску...',
+        );
+        notifyListeners();
+
+        // Launch download worker
+        _downloadTrack(_queue[nextIndex]);
       }
     } finally {
       _isProcessing = false;
@@ -131,8 +141,6 @@ class AudioDownloadManager extends ChangeNotifier {
 
   Future<void> _downloadTrack(DownloadItem item) async {
     final track = item.track;
-    final trackIndex = _queue.indexWhere((q) => q.track.id == track.id);
-    if (trackIndex == -1) return;
 
     void updateStatus({
       required DownloadStatus status,
@@ -279,7 +287,7 @@ class AudioDownloadManager extends ChangeNotifier {
         debugPrint('Tagging non-critical warning: $e');
       }
 
-      // 6. Move to Public Music Directory
+      // 6. Move to Target Music Directory
       final finalFilename = TrackTitleCleaner.buildFilename(
         trackNumber: track.trackNumber,
         artist: track.artist,
