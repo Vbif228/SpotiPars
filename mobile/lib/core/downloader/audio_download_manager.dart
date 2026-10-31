@@ -185,101 +185,6 @@ class AudioDownloadManager extends ChangeNotifier {
     }
   }
 
-  /// Downloads a StreamInfo into a temp file with watchdog timeout.
-  /// Returns true if the downloaded file is complete and >= 500 KB.
-  Future<bool> _tryDownloadStreamToFile({
-    required StreamInfo streamInfo,
-    required File tempFile,
-    required void Function(double progress, int downloaded, int total) onProgress,
-  }) async {
-    if (_isCancelled) return false;
-
-    IOSink? fileSink;
-    try {
-      if (await tempFile.exists()) {
-        await tempFile.delete();
-      }
-      fileSink = tempFile.openWrite();
-
-      final totalBytes = streamInfo.size.totalBytes;
-      int downloadedBytes = 0;
-      int lastReportedPercent = -1;
-      int lastReportedTime = 0;
-      bool receivedFirstChunk = false;
-
-      final rawStream = _ytClient.videos.streamsClient.get(streamInfo);
-
-      // Fast watchdog timeout: if no chunks arrive in 10s (e.g. 403 freeze),
-      // throw TimeoutException so we immediately switch to the next stream candidate.
-      final timedStream = rawStream.timeout(
-        const Duration(seconds: 10),
-        onTimeout: (sink) {
-          sink.addError(
-            TimeoutException('Таймаут ожидания данных от потока YouTube'),
-          );
-        },
-      );
-
-      await for (final chunk in timedStream) {
-        if (_isCancelled) {
-          try {
-            await fileSink.close();
-          } catch (_) {}
-          if (await tempFile.exists()) await tempFile.delete();
-          return false;
-        }
-
-        if (chunk.isEmpty) continue;
-        receivedFirstChunk = true;
-
-        fileSink.add(chunk);
-        downloadedBytes += chunk.length;
-
-        final double progress = totalBytes > 0
-            ? (0.05 + (downloadedBytes / totalBytes) * 0.90).clamp(0.05, 0.95)
-            : 0.5;
-
-        final percent = (progress * 100).toInt();
-        final now = DateTime.now().millisecondsSinceEpoch;
-
-        if ((percent != lastReportedPercent && (now - lastReportedTime >= 100)) ||
-            percent == 95) {
-          lastReportedPercent = percent;
-          lastReportedTime = now;
-          onProgress(progress, downloadedBytes, totalBytes);
-        }
-      }
-
-      await fileSink.flush();
-      await fileSink.close();
-      fileSink = null;
-
-      if (!receivedFirstChunk) {
-        return false;
-      }
-
-      final finalSize = await tempFile.length();
-      if (finalSize >= AppConstants.minValidAudioBytes) {
-        return true;
-      }
-    } catch (e) {
-      debugPrint('Stream download attempt (tag ${streamInfo.tag}) failed: $e');
-    } finally {
-      if (fileSink != null) {
-        try {
-          await fileSink.close();
-        } catch (_) {}
-      }
-    }
-
-    if (await tempFile.exists()) {
-      try {
-        await tempFile.delete();
-      } catch (_) {}
-    }
-    return false;
-  }
-
   Future<void> _downloadTrack(DownloadItem item) async {
     final track = item.track;
 
@@ -332,7 +237,6 @@ class AudioDownloadManager extends ChangeNotifier {
 
       int attempt = 0;
       const maxAttempts = 3;
-      final failedVideoIds = <String>{};
 
       while (attempt < maxAttempts) {
         attempt++;
@@ -352,14 +256,13 @@ class AudioDownloadManager extends ChangeNotifier {
           updateStatus(
             status: DownloadStatus.searching,
             message: attempt > 1
-                ? 'Повторный поиск другого видео ($attempt/$maxAttempts)...'
+                ? 'Повторный поиск аудио на YouTube ($attempt/$maxAttempts)...'
                 : 'Поиск лучшего аудио на YouTube...',
             progress: 0.02,
           );
 
           final match = await _searchEngine.findBestAudioStream(
             track,
-            excludedVideoIds: failedVideoIds,
             onStatusUpdate: (msg) {
               updateStatus(
                 status: DownloadStatus.searching,
@@ -389,7 +292,7 @@ class AudioDownloadManager extends ChangeNotifier {
             return;
           }
 
-          // 4. Download Stream to Temp File (Cascade over candidate streams: muxed itag 18 -> audioOnly)
+          // 4. Download Stream to Temp File (Muxed itag 18 AAC is prioritized)
           updateStatus(
             status: DownloadStatus.downloading,
             message: 'Подключение к аудиопотоку...',
@@ -397,71 +300,94 @@ class AudioDownloadManager extends ChangeNotifier {
           );
 
           final tempDir = await getTemporaryDirectory();
-          final createdTempFile = File(p.join(
+          final localTemp = File(p.join(
             tempDir.path,
             'tmp_${track.trackNumber}_${DateTime.now().millisecondsSinceEpoch}.$_audioFormat',
           ));
-          tempFile = createdTempFile;
+          tempFile = localTemp;
 
-          bool downloadedSuccessfully = false;
-          final allCandidateStreams = match.allStreams;
+          final stream = _ytClient.videos.streamsClient.get(match.streamInfo);
+          final fileSink = localTemp.openWrite();
 
-          for (int sIdx = 0; sIdx < allCandidateStreams.length; sIdx++) {
-            if (_isCancelled) {
-              updateStatus(
-                status: DownloadStatus.cancelled,
-                message: 'Отменено',
-                progress: 0.0,
+          final totalBytes = match.streamInfo.size.totalBytes;
+          int downloadedBytes = 0;
+          int lastReportedPercent = -1;
+          int lastReportedTime = 0;
+
+          // Apply a 15-second inactivity timeout to prevent frozen downloads
+          final streamWithTimeout = stream.timeout(
+            const Duration(seconds: 15),
+            onTimeout: (sink) {
+              sink.addError(
+                TimeoutException('Таймаут передачи аудиопотока YouTube (15 сек)'),
               );
-              return;
-            }
+            },
+          );
 
-            final candidateStream = allCandidateStreams[sIdx];
-            if (sIdx > 0) {
-              updateStatus(
-                status: DownloadStatus.downloading,
-                message:
-                    'Переключение на резервный поток (${sIdx + 1}/${allCandidateStreams.length})...',
-                progress: 0.05,
-              );
-            }
+          try {
+            await for (final chunk in streamWithTimeout) {
+              if (_isCancelled) {
+                try {
+                  await fileSink.flush();
+                  await fileSink.close();
+                } catch (_) {}
+                if (await localTemp.exists()) await localTemp.delete();
+                updateStatus(
+                  status: DownloadStatus.cancelled,
+                  message: 'Отменено',
+                  progress: 0.0,
+                );
+                return;
+              }
 
-            downloadedSuccessfully = await _tryDownloadStreamToFile(
-              streamInfo: candidateStream,
-              tempFile: createdTempFile,
-              onProgress: (progress, downloaded, total) {
-                final percent = (progress * 100).toInt();
+              fileSink.add(chunk);
+              downloadedBytes += chunk.length;
+
+              final double progress = totalBytes > 0
+                  ? (0.05 + (downloadedBytes / totalBytes) * 0.90).clamp(0.05, 0.95)
+                  : 0.5;
+
+              final percent = (progress * 100).toInt();
+              final now = DateTime.now().millisecondsSinceEpoch;
+
+              // Throttle UI progress updates to avoid flooding main isolate (smooth 60/120 FPS)
+              if ((percent != lastReportedPercent &&
+                      (now - lastReportedTime >= 100)) ||
+                  percent == 95) {
+                lastReportedPercent = percent;
+                lastReportedTime = now;
                 updateStatus(
                   status: DownloadStatus.downloading,
                   message: 'Скачивание $percent%...',
                   progress: progress,
-                  downloaded: downloaded,
-                  total: total,
+                  downloaded: downloadedBytes,
+                  total: totalBytes,
                 );
-              },
-            );
-
-            if (downloadedSuccessfully) {
-              break;
+              }
             }
+
+            await fileSink.flush();
+            await fileSink.close();
+          } catch (streamErr) {
+            try {
+              await fileSink.flush();
+              await fileSink.close();
+            } catch (_) {}
+            if (await localTemp.exists()) await localTemp.delete();
+            rethrow;
           }
 
-          // If all streams of this video fail, black-list the video and try next candidate on retry
-          if (!downloadedSuccessfully) {
-            failedVideoIds.add(match.video.id.value);
-            if (attempt < maxAttempts && !_isCancelled) {
-              _resetYtClient();
-              continue;
-            } else {
-              updateStatus(
-                status: DownloadStatus.failed,
-                message: 'Ошибка скачивания аудиопотока (403 / таймаут)',
-                progress: 0.0,
-                error:
-                    'Все потоки видео (${match.video.id.value}) оказались недоступны или заблокированы.',
-              );
-              return;
-            }
+          // Verify file size
+          final finalTempSize = await localTemp.length();
+          if (finalTempSize < AppConstants.minValidAudioBytes) {
+            if (await localTemp.exists()) await localTemp.delete();
+            updateStatus(
+              status: DownloadStatus.failed,
+              message: 'Файл слишком мал (заглушка)',
+              progress: 0.0,
+              error: 'Stream size < 500 KB',
+            );
+            return;
           }
 
           // 5. Ingest ID3v2 Tags and Album Cover (Safe against corrupting MP4 containers)
@@ -472,7 +398,7 @@ class AudioDownloadManager extends ChangeNotifier {
           );
 
           try {
-            await _tagger.tagMp3File(createdTempFile, track);
+            await _tagger.tagMp3File(localTemp, track);
           } catch (e) {
             debugPrint('Tagging non-critical warning: $e');
           }
@@ -491,9 +417,9 @@ class AudioDownloadManager extends ChangeNotifier {
           if (await finalTargetFile.exists()) {
             await finalTargetFile.delete();
           }
-          await createdTempFile.copy(finalTargetFile.path);
-          if (await createdTempFile.exists()) {
-            await createdTempFile.delete();
+          await localTemp.copy(finalTargetFile.path);
+          if (await localTemp.exists()) {
+            await localTemp.delete();
           }
 
           updateStatus(

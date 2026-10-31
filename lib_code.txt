@@ -1,0 +1,3915 @@
+// ==================== Z:/VIBECODE/spotipars\mobile\android\app\src\main\AndroidManifest.xml ====================
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.vbif228.spotipars">
+
+    <!-- Network permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Foreground download & notification permissions -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Storage permissions for writing/reading music & exported lists -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+
+    <application
+        android:label="SpotiPars"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true"
+        android:requestLegacyExternalStorage="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+
+            <!-- Main App Launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+
+            <!-- Intercept 'Share' menu from Spotify app (text/plain) -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <!-- Background Foreground Service for uninterrupted downloads -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
+
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+</manifest>
+
+
+// ==================== mobile\lib\main.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+import 'core/downloader/audio_download_manager.dart';
+import 'core/models/download_item.dart';
+import 'core/spotify/spotify_scraper.dart';
+import 'services/foreground_download_service.dart';
+import 'services/share_intent_receiver.dart';
+import 'ui/screens/home_screen.dart';
+import 'ui/screens/preview_screen.dart';
+import 'ui/screens/queue_screen.dart';
+import 'ui/screens/settings_screen.dart';
+import 'ui/theme/spotify_theme.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize background foreground service
+  await ForegroundDownloadService.initialize();
+
+  runApp(
+    const ProviderScope(
+      child: SpotiParsApp(),
+    ),
+  );
+}
+
+class SpotiParsApp extends StatelessWidget {
+  const SpotiParsApp({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'SpotiPars Mobile',
+      debugShowCheckedModeBanner: false,
+      theme: SpotifyTheme.darkTheme,
+      home: const MainNavigationShell(),
+    );
+  }
+}
+
+class MainNavigationShell extends StatefulWidget {
+  const MainNavigationShell({Key? key}) : super(key: key);
+
+  @override
+  State<MainNavigationShell> createState() => _MainNavigationShellState();
+}
+
+class _MainNavigationShellState extends State<MainNavigationShell> {
+  int _currentIndex = 0;
+  final AudioDownloadManager _downloadManager = AudioDownloadManager();
+  final ShareIntentReceiver _intentReceiver = ShareIntentReceiver();
+  final SpotifyScraper _scraper = SpotifyScraper();
+
+  late final List<Widget> _screens = [
+    HomeScreen(
+      downloadManager: _downloadManager,
+      onNavigateToQueue: () => setState(() => _currentIndex = 1),
+    ),
+    QueueScreen(downloadManager: _downloadManager),
+    SettingsScreen(downloadManager: _downloadManager),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Request permissions on startup
+    _requestAppPermissions();
+
+    // Listen for incoming links from Android 'Share' menu in Spotify
+    _intentReceiver.initialize(
+      onLinkReceived: (url) {
+        _handleSharedLink(url);
+      },
+    );
+  }
+
+  Future<void> _requestAppPermissions() async {
+    try {
+      await [
+        Permission.notification,
+        Permission.storage,
+        Permission.audio,
+      ].request();
+    } catch (e) {
+      debugPrint('Permission request notice: $e');
+    }
+  }
+
+  Future<void> _handleSharedLink(String url) async {
+    try {
+      final info = await _scraper.fetchEntity(url);
+      if (!mounted) return;
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => PreviewScreen(
+            playlistInfo: info,
+            audioFormat: _downloadManager.audioFormat,
+            createSubfolder: true,
+            downloadManager: _downloadManager,
+            onStartDownload: () => setState(() => _currentIndex = 1),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Ошибка распознавания ссылки: $e'),
+          backgroundColor: SpotifyTheme.error,
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _intentReceiver.dispose();
+    _downloadManager.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(
+        index: _currentIndex,
+        children: _screens,
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
+        destinations: [
+          const NavigationDestination(
+            icon: Icon(Icons.search),
+            selectedIcon: Icon(Icons.search, color: SpotifyTheme.spotifyGreen),
+            label: 'Поиск',
+          ),
+          NavigationDestination(
+            icon: AnimatedBuilder(
+              animation: _downloadManager,
+              builder: (_, __) {
+                final activeCount = _downloadManager.queue
+                    .where((i) =>
+                        i.status == DownloadStatus.downloading ||
+                        i.status == DownloadStatus.searching ||
+                        i.status == DownloadStatus.tagging ||
+                        i.status == DownloadStatus.queued)
+                    .length;
+                return Badge(
+                  isLabelVisible: activeCount > 0,
+                  label: Text('$activeCount'),
+                  child: const Icon(Icons.download),
+                );
+              },
+            ),
+            selectedIcon: AnimatedBuilder(
+              animation: _downloadManager,
+              builder: (_, __) {
+                final activeCount = _downloadManager.queue
+                    .where((i) =>
+                        i.status == DownloadStatus.downloading ||
+                        i.status == DownloadStatus.searching ||
+                        i.status == DownloadStatus.tagging ||
+                        i.status == DownloadStatus.queued)
+                    .length;
+                return Badge(
+                  isLabelVisible: activeCount > 0,
+                  label: Text('$activeCount'),
+                  child: const Icon(Icons.download, color: SpotifyTheme.spotifyGreen),
+                );
+              },
+            ),
+            label: 'Очередь',
+          ),
+          const NavigationDestination(
+            icon: Icon(Icons.settings),
+            selectedIcon: Icon(Icons.settings, color: SpotifyTheme.spotifyGreen),
+            label: 'Настройки',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+// ==================== mobile\lib\core\constants\app_constants.dart ====================
+class AppConstants {
+  static const String appName = 'SpotiPars';
+  static const String appVersion = '1.0.0';
+
+  // Default directories
+  static const String defaultMusicDirName = 'Music/SpotiPars';
+
+  // HTTP User Agents
+  static const String browserUserAgent =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+      'AppleWebKit/537.36 (KHTML, like Gecko) '
+      'Chrome/124.0.0.0 Safari/537.36';
+
+  static const String crawlerUserAgent =
+      'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
+
+  // Download thresholds
+  static const int minValidAudioBytes = 500 * 1024; // 500 KB to reject preview stubs
+  static const int minExistingFileSize = 10 * 1024; // 10 KB for deduplication
+
+  // Supported audio formats
+  static const String formatMp3 = 'mp3';
+  static const String formatFlac = 'flac';
+
+  // Foreground notification channel
+  static const String notificationChannelId = 'spotipars_foreground_channel';
+  static const String notificationChannelName = 'SpotiPars Downloads';
+  static const String notificationChannelDesc =
+      'Ongoing background music downloads notification';
+}
+
+
+// ==================== mobile\lib\core\downloader\audio_download_manager.dart ====================
+import 'dart:async';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:youtube_explode_dart/youtube_explode_dart.dart';
+
+import '../constants/app_constants.dart';
+import '../models/download_item.dart';
+import '../models/track_item.dart';
+import '../storage/media_store_helper.dart';
+import '../tagger/id3_tagger.dart';
+import '../youtube/track_title_cleaner.dart';
+import '../youtube/youtube_search_engine.dart';
+
+typedef DownloadProgressCallback = void Function(List<DownloadItem> items);
+
+class AudioDownloadManager extends ChangeNotifier {
+  static final AudioDownloadManager instance = AudioDownloadManager._internal();
+
+  factory AudioDownloadManager() => instance;
+
+  late YoutubeExplode _ytClient;
+  late YouTubeSearchEngine _searchEngine;
+  final Id3Tagger _tagger;
+
+  AudioDownloadManager._internal({
+    YouTubeSearchEngine? searchEngine,
+    Id3Tagger? tagger,
+    YoutubeExplode? ytClient,
+  }) : _tagger = tagger ?? Id3Tagger() {
+    _ytClient = ytClient ?? YoutubeExplode();
+    _searchEngine = searchEngine ?? YouTubeSearchEngine(yt: _ytClient);
+  }
+
+  void _resetYtClient() {
+    try {
+      _ytClient.close();
+    } catch (_) {}
+    _ytClient = YoutubeExplode();
+    _searchEngine.updateClient(_ytClient);
+  }
+
+  final List<DownloadItem> _queue = [];
+  bool _isProcessing = false;
+  bool _isCancelled = false;
+  int _maxConcurrency = 1;
+  String _audioFormat = AppConstants.formatMp3;
+  String _subFolder = '';
+
+  List<DownloadItem> get queue => List.unmodifiable(_queue);
+  bool get isProcessing => _isProcessing;
+  int get maxConcurrency => _maxConcurrency;
+  String get audioFormat => _audioFormat;
+  String get subFolder => _subFolder;
+
+  void configure({
+    int? maxConcurrency,
+    String? audioFormat,
+    String? subFolder,
+  }) {
+    if (maxConcurrency != null) _maxConcurrency = maxConcurrency.clamp(1, 4);
+    if (audioFormat != null) _audioFormat = audioFormat;
+    if (subFolder != null) _subFolder = subFolder;
+    notifyListeners();
+  }
+
+  void addTracks(List<TrackItem> tracks) {
+    for (final track in tracks) {
+      if (!_queue.any((item) => item.track.id == track.id)) {
+        _queue.add(
+          DownloadItem(
+            track: track,
+            status: DownloadStatus.queued,
+            statusMessage: 'В очереди',
+            progress: 0.0,
+          ),
+        );
+      }
+    }
+    notifyListeners();
+    _processQueue();
+  }
+
+  void cancelAll() {
+    _isCancelled = true;
+    for (int i = 0; i < _queue.length; i++) {
+      if (!_queue[i].isCompleted) {
+        _queue[i] = _queue[i].copyWith(
+          status: DownloadStatus.cancelled,
+          statusMessage: 'Отменено',
+          progress: 0.0,
+        );
+      }
+    }
+    _isProcessing = false;
+    notifyListeners();
+  }
+
+  void clearCompleted() {
+    _queue.removeWhere((item) => item.isCompleted);
+    notifyListeners();
+  }
+
+  void retryTrack(TrackItem track) {
+    final idx = _queue.indexWhere((q) => q.track.id == track.id);
+    if (idx != -1) {
+      _queue[idx] = _queue[idx].copyWith(
+        status: DownloadStatus.queued,
+        statusMessage: 'В очереди (повтор)',
+        error: null,
+        progress: 0.0,
+      );
+      notifyListeners();
+      _processQueue();
+    }
+  }
+
+  void retryFailed() {
+    bool hasAny = false;
+    for (int i = 0; i < _queue.length; i++) {
+      if (_queue[i].status == DownloadStatus.failed ||
+          _queue[i].status == DownloadStatus.cancelled) {
+        _queue[i] = _queue[i].copyWith(
+          status: DownloadStatus.queued,
+          statusMessage: 'В очереди (повтор)',
+          error: null,
+          progress: 0.0,
+        );
+        hasAny = true;
+      }
+    }
+    if (hasAny) {
+      notifyListeners();
+      _processQueue();
+    }
+  }
+
+  Future<void> _processQueue() async {
+    if (_isProcessing) return;
+    _isProcessing = true;
+    _isCancelled = false;
+
+    try {
+      while (!_isCancelled) {
+        final activeDownloads = _queue
+            .where((item) =>
+                item.status == DownloadStatus.searching ||
+                item.status == DownloadStatus.downloading ||
+                item.status == DownloadStatus.tagging)
+            .length;
+
+        if (activeDownloads >= _maxConcurrency) {
+          await Future.delayed(const Duration(milliseconds: 300));
+          continue;
+        }
+
+        final nextIndex = _queue.indexWhere(
+          (item) => item.status == DownloadStatus.queued,
+        );
+
+        if (nextIndex == -1) {
+          if (activeDownloads == 0) {
+            break;
+          }
+          await Future.delayed(const Duration(milliseconds: 300));
+          continue;
+        }
+
+        final itemToDownload = _queue[nextIndex];
+        _queue[nextIndex] = itemToDownload.copyWith(
+          status: DownloadStatus.searching,
+          statusMessage: 'Подготовка к поиску...',
+          progress: 0.0,
+        );
+        notifyListeners();
+
+        _downloadTrack(_queue[nextIndex]);
+
+        await Future.delayed(const Duration(milliseconds: 1200));
+      }
+    } finally {
+      _isProcessing = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _downloadTrack(DownloadItem item) async {
+    final track = item.track;
+
+    void updateStatus({
+      required DownloadStatus status,
+      required String message,
+      double? progress,
+      String? localPath,
+      String? error,
+      int? downloaded,
+      int? total,
+    }) {
+      final idx = _queue.indexWhere((q) => q.track.id == track.id);
+      if (idx != -1) {
+        _queue[idx] = _queue[idx].copyWith(
+          status: status,
+          statusMessage: message,
+          progress: progress,
+          localPath: localPath,
+          error: error,
+          downloadedBytes: downloaded,
+          totalBytes: total,
+        );
+        notifyListeners();
+      }
+    }
+
+    try {
+      // 1. Resolve Target Directory
+      final targetDir =
+          await MediaStoreHelper.getMusicDirectory(subFolder: _subFolder);
+
+      // 2. Check Deduplication
+      final existing = await MediaStoreHelper.findExistingTrackFile(
+        directory: targetDir,
+        artist: track.artist,
+        title: track.title,
+        ext: _audioFormat,
+      );
+
+      if (existing != null) {
+        updateStatus(
+          status: DownloadStatus.skipped,
+          message: 'Пропущен (уже скачан)',
+          progress: 1.0,
+          localPath: existing.path,
+        );
+        return;
+      }
+
+      int attempt = 0;
+      const maxAttempts = 3;
+
+      while (attempt < maxAttempts) {
+        attempt++;
+        File? tempFile;
+
+        try {
+          if (_isCancelled) {
+            updateStatus(
+              status: DownloadStatus.cancelled,
+              message: 'Отменено',
+              progress: 0.0,
+            );
+            return;
+          }
+
+          // 3. YouTube Cascade Search
+          updateStatus(
+            status: DownloadStatus.searching,
+            message: attempt > 1
+                ? 'Повторный поиск аудио на YouTube ($attempt/$maxAttempts)...'
+                : 'Поиск лучшего аудио на YouTube...',
+            progress: 0.02,
+          );
+
+          final match = await _searchEngine.findBestAudioStream(
+            track,
+            onStatusUpdate: (msg) {
+              updateStatus(
+                status: DownloadStatus.searching,
+                message: msg,
+                progress: 0.02,
+              );
+            },
+          );
+
+          if (match == null) {
+            updateStatus(
+              status: DownloadStatus.failed,
+              message: 'Не найден подходящий трек на YouTube',
+              progress: 0.0,
+              error:
+                  'Не удалось найти подходящий аудиопоток для "${track.artist} - ${track.title}"',
+            );
+            return;
+          }
+
+          if (_isCancelled) {
+            updateStatus(
+              status: DownloadStatus.cancelled,
+              message: 'Отменено',
+              progress: 0.0,
+            );
+            return;
+          }
+
+          // 4. Download Stream to Temp File (Muxed itag 18 AAC is prioritized)
+          updateStatus(
+            status: DownloadStatus.downloading,
+            message: 'Подключение к аудиопотоку...',
+            progress: 0.05,
+          );
+
+          final tempDir = await getTemporaryDirectory();
+          final localTemp = File(p.join(
+            tempDir.path,
+            'tmp_${track.trackNumber}_${DateTime.now().millisecondsSinceEpoch}.$_audioFormat',
+          ));
+          tempFile = localTemp;
+
+          final stream = _ytClient.videos.streamsClient.get(match.streamInfo);
+          final fileSink = localTemp.openWrite();
+
+          final totalBytes = match.streamInfo.size.totalBytes;
+          int downloadedBytes = 0;
+          int lastReportedPercent = -1;
+          int lastReportedTime = 0;
+
+          // Apply a 15-second inactivity timeout to prevent frozen downloads
+          final streamWithTimeout = stream.timeout(
+            const Duration(seconds: 15),
+            onTimeout: (sink) {
+              sink.addError(
+                TimeoutException('Таймаут передачи аудиопотока YouTube (15 сек)'),
+              );
+            },
+          );
+
+          try {
+            await for (final chunk in streamWithTimeout) {
+              if (_isCancelled) {
+                try {
+                  await fileSink.flush();
+                  await fileSink.close();
+                } catch (_) {}
+                if (await localTemp.exists()) await localTemp.delete();
+                updateStatus(
+                  status: DownloadStatus.cancelled,
+                  message: 'Отменено',
+                  progress: 0.0,
+                );
+                return;
+              }
+
+              fileSink.add(chunk);
+              downloadedBytes += chunk.length;
+
+              final double progress = totalBytes > 0
+                  ? (0.05 + (downloadedBytes / totalBytes) * 0.90).clamp(0.05, 0.95)
+                  : 0.5;
+
+              final percent = (progress * 100).toInt();
+              final now = DateTime.now().millisecondsSinceEpoch;
+
+              // Throttle UI progress updates to avoid flooding main isolate (smooth 60/120 FPS)
+              if ((percent != lastReportedPercent &&
+                      (now - lastReportedTime >= 100)) ||
+                  percent == 95) {
+                lastReportedPercent = percent;
+                lastReportedTime = now;
+                updateStatus(
+                  status: DownloadStatus.downloading,
+                  message: 'Скачивание $percent%...',
+                  progress: progress,
+                  downloaded: downloadedBytes,
+                  total: totalBytes,
+                );
+              }
+            }
+
+            await fileSink.flush();
+            await fileSink.close();
+          } catch (streamErr) {
+            try {
+              await fileSink.flush();
+              await fileSink.close();
+            } catch (_) {}
+            if (await localTemp.exists()) await localTemp.delete();
+            rethrow;
+          }
+
+          // Verify file size
+          final finalTempSize = await localTemp.length();
+          if (finalTempSize < AppConstants.minValidAudioBytes) {
+            if (await localTemp.exists()) await localTemp.delete();
+            updateStatus(
+              status: DownloadStatus.failed,
+              message: 'Файл слишком мал (заглушка)',
+              progress: 0.0,
+              error: 'Stream size < 500 KB',
+            );
+            return;
+          }
+
+          // 5. Ingest ID3v2 Tags and Album Cover (Safe against corrupting MP4 containers)
+          updateStatus(
+            status: DownloadStatus.tagging,
+            message: 'Вшивка тегов и обложки...',
+            progress: 0.96,
+          );
+
+          try {
+            await _tagger.tagMp3File(localTemp, track);
+          } catch (e) {
+            debugPrint('Tagging non-critical warning: $e');
+          }
+
+          // 6. Move to Target Music Directory
+          final finalFilename = TrackTitleCleaner.buildFilename(
+            trackNumber: track.trackNumber,
+            artist: track.artist,
+            title: track.title,
+            ext: _audioFormat,
+            includeNumber: true,
+            totalTracks: _queue.length,
+          );
+
+          final finalTargetFile = File(p.join(targetDir.path, finalFilename));
+          if (await finalTargetFile.exists()) {
+            await finalTargetFile.delete();
+          }
+          await localTemp.copy(finalTargetFile.path);
+          if (await localTemp.exists()) {
+            await localTemp.delete();
+          }
+
+          updateStatus(
+            status: DownloadStatus.finished,
+            message: 'Готово',
+            progress: 1.0,
+            localPath: finalTargetFile.path,
+          );
+
+          // Success - exit retry loop
+          return;
+        } on RequestLimitExceededException catch (e) {
+          if (tempFile != null && await tempFile.exists()) {
+            try {
+              await tempFile.delete();
+            } catch (_) {}
+          }
+
+          if (attempt < maxAttempts && !_isCancelled) {
+            updateStatus(
+              status: DownloadStatus.searching,
+              message:
+                  'Лимит YouTube (429). Пауза 8с перед повтором ($attempt/$maxAttempts)...',
+              progress: 0.0,
+            );
+            _resetYtClient();
+            await Future.delayed(const Duration(seconds: 8));
+            continue;
+          } else {
+            updateStatus(
+              status: DownloadStatus.failed,
+              message: 'Лимит запросов YouTube (429)',
+              progress: 0.0,
+              error:
+                  'YouTube временно ограничил запросы с вашего IP адреса (Rate Limit / 429).\n\n'
+                  'РЕКОМЕНДАЦИИ ДЛЯ РЕШЕНИЯ:\n'
+                  '1. Если у вас включен VPN (значок ключа вверху экрана) — обязательно отключите его или смените сервер. Серверы YouTube строго блокируют общедоступные IP-адреса VPN.\n'
+                  '2. Подождите 1–2 минуты для сброса счетчика запросов YouTube.\n'
+                  '3. Нажмите кнопку «Повторить» или иконку обновления в шапке очереди.\n\n'
+                  'Технические данные:\n$e',
+            );
+            return;
+          }
+        } catch (e) {
+          if (tempFile != null && await tempFile.exists()) {
+            try {
+              await tempFile.delete();
+            } catch (_) {}
+          }
+
+          if (attempt < maxAttempts &&
+              (e is TimeoutException ||
+                  e.toString().contains('ClientException') ||
+                  e.toString().contains('SocketException')) &&
+              !_isCancelled) {
+            updateStatus(
+              status: DownloadStatus.searching,
+              message:
+                  'Сбой соединения. Пауза 3с перед повтором ($attempt/$maxAttempts)...',
+              progress: 0.0,
+            );
+            await Future.delayed(const Duration(seconds: 3));
+            continue;
+          }
+
+          updateStatus(
+            status: DownloadStatus.failed,
+            message: 'Ошибка: $e',
+            progress: 0.0,
+            error: e.toString(),
+          );
+          return;
+        }
+      }
+    } catch (outerErr) {
+      updateStatus(
+        status: DownloadStatus.failed,
+        message: 'Ошибка: $outerErr',
+        progress: 0.0,
+        error: outerErr.toString(),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _ytClient.close();
+    _searchEngine.close();
+    super.dispose();
+  }
+}
+
+
+// ==================== mobile\lib\core\models\download_item.dart ====================
+import 'track_item.dart';
+
+enum DownloadStatus {
+  queued,
+  searching,
+  downloading,
+  tagging,
+  finished,
+  failed,
+  skipped,
+  cancelled,
+}
+
+class DownloadItem {
+  final TrackItem track;
+  final DownloadStatus status;
+  final double progress; // 0.0 to 1.0
+  final String statusMessage;
+  final String? localPath;
+  final String? error;
+  final int downloadedBytes;
+  final int totalBytes;
+
+  const DownloadItem({
+    required this.track,
+    this.status = DownloadStatus.queued,
+    this.progress = 0.0,
+    this.statusMessage = 'В очереди',
+    this.localPath,
+    this.error,
+    this.downloadedBytes = 0,
+    this.totalBytes = 0,
+  });
+
+  bool get isCompleted =>
+      status == DownloadStatus.finished ||
+      status == DownloadStatus.skipped ||
+      status == DownloadStatus.failed ||
+      status == DownloadStatus.cancelled;
+
+  DownloadItem copyWith({
+    TrackItem? track,
+    DownloadStatus? status,
+    double? progress,
+    String? statusMessage,
+    String? localPath,
+    String? error,
+    int? downloadedBytes,
+    int? totalBytes,
+  }) {
+    return DownloadItem(
+      track: track ?? this.track,
+      status: status ?? this.status,
+      progress: progress ?? this.progress,
+      statusMessage: statusMessage ?? this.statusMessage,
+      localPath: localPath ?? this.localPath,
+      error: error ?? this.error,
+      downloadedBytes: downloadedBytes ?? this.downloadedBytes,
+      totalBytes: totalBytes ?? this.totalBytes,
+    );
+  }
+}
+
+
+// ==================== mobile\lib\core\models\playlist_info.dart ====================
+import 'track_item.dart';
+
+class PlaylistInfo {
+  final String id;
+  final String type; // 'playlist', 'album', 'track'
+  final String title;
+  final String description;
+  final String ownerName;
+  final String coverUrl;
+  final List<TrackItem> tracks;
+  final String originalUrl;
+
+  const PlaylistInfo({
+    required this.id,
+    required this.type,
+    required this.title,
+    this.description = '',
+    this.ownerName = '',
+    this.coverUrl = '',
+    this.tracks = const [],
+    this.originalUrl = '',
+  });
+
+  int get totalTracksCount => tracks.length;
+
+  int get selectedTracksCount =>
+      tracks.where((track) => track.isSelected).length;
+
+  List<TrackItem> get selectedTracks =>
+      tracks.where((track) => track.isSelected).toList();
+
+  PlaylistInfo copyWith({
+    String? id,
+    String? type,
+    String? title,
+    String? description,
+    String? ownerName,
+    String? coverUrl,
+    List<TrackItem>? tracks,
+    String? originalUrl,
+  }) {
+    return PlaylistInfo(
+      id: id ?? this.id,
+      type: type ?? this.type,
+      title: title ?? this.title,
+      description: description ?? this.description,
+      ownerName: ownerName ?? this.ownerName,
+      coverUrl: coverUrl ?? this.coverUrl,
+      tracks: tracks ?? this.tracks,
+      originalUrl: originalUrl ?? this.originalUrl,
+    );
+  }
+}
+
+
+// ==================== mobile\lib\core\models\track_item.dart ====================
+class TrackItem {
+  final String id;
+  final String title;
+  final String artist;
+  final String album;
+  final String coverUrl;
+  final int durationMs;
+  final int trackNumber;
+  final bool isSelected;
+
+  const TrackItem({
+    required this.id,
+    required this.title,
+    required this.artist,
+    this.album = '',
+    this.coverUrl = '',
+    this.durationMs = 0,
+    this.trackNumber = 1,
+    this.isSelected = true,
+  });
+
+  TrackItem copyWith({
+    String? id,
+    String? title,
+    String? artist,
+    String? album,
+    String? coverUrl,
+    int? durationMs,
+    int? trackNumber,
+    bool? isSelected,
+  }) {
+    return TrackItem(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      artist: artist ?? this.artist,
+      album: album ?? this.album,
+      coverUrl: coverUrl ?? this.coverUrl,
+      durationMs: durationMs ?? this.durationMs,
+      trackNumber: trackNumber ?? this.trackNumber,
+      isSelected: isSelected ?? this.isSelected,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'artist': artist,
+        'album': album,
+        'coverUrl': coverUrl,
+        'durationMs': durationMs,
+        'trackNumber': trackNumber,
+        'isSelected': isSelected,
+      };
+
+  factory TrackItem.fromJson(Map<String, dynamic> json) => TrackItem(
+        id: json['id'] as String? ?? '',
+        title: json['title'] as String? ?? 'Unknown Title',
+        artist: json['artist'] as String? ?? 'Unknown Artist',
+        album: json['album'] as String? ?? '',
+        coverUrl: json['coverUrl'] as String? ?? '',
+        durationMs: json['durationMs'] as int? ?? 0,
+        trackNumber: json['trackNumber'] as int? ?? 1,
+        isSelected: json['isSelected'] as bool? ?? true,
+      );
+
+  String get durationFormatted {
+    if (durationMs <= 0) return '--:--';
+    final totalSeconds = durationMs ~/ 1000;
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TrackItem && runtimeType == other.runtimeType && id == other.id;
+
+  @override
+  int get hashCode => id.hashCode;
+}
+
+
+// ==================== mobile\lib\core\spotify\spotify_scraper.dart ====================
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import '../constants/app_constants.dart';
+import '../models/playlist_info.dart';
+import '../models/track_item.dart';
+
+class SpotifyScraper {
+  final http.Client _client;
+
+  SpotifyScraper({http.Client? client}) : _client = client ?? http.Client();
+
+  static final RegExp trackRegex = RegExp(
+    r'(?:spotify:track:|https?://open\.spotify\.com/(?:[a-zA-Z0-9_-]+/)?track/)([a-zA-Z0-9]{22})',
+  );
+
+  static final RegExp playlistRegex = RegExp(
+    r'(?:spotify:playlist:|https?://open\.spotify\.com/(?:[a-zA-Z0-9_-]+/)?playlist/)([a-zA-Z0-9]{22})',
+  );
+
+  static final RegExp albumRegex = RegExp(
+    r'(?:spotify:album:|https?://open\.spotify\.com/(?:[a-zA-Z0-9_-]+/)?album/)([a-zA-Z0-9]{22})',
+  );
+
+  /// Identifies the type and ID from an arbitrary input string or URL.
+  static ({String type, String id})? parseUrl(String input) {
+    final trackMatch = trackRegex.firstMatch(input);
+    if (trackMatch != null) {
+      return (type: 'track', id: trackMatch.group(1)!);
+    }
+
+    final playlistMatch = playlistRegex.firstMatch(input);
+    if (playlistMatch != null) {
+      return (type: 'playlist', id: playlistMatch.group(1)!);
+    }
+
+    final albumMatch = albumRegex.firstMatch(input);
+    if (albumMatch != null) {
+      return (type: 'album', id: albumMatch.group(1)!);
+    }
+
+    return null;
+  }
+
+  /// Fetches track, playlist or album information based on parsed URL.
+  Future<PlaylistInfo> fetchEntity(String url) async {
+    final parsed = parseUrl(url);
+    if (parsed == null) {
+      throw FormatException('Некорректная ссылка Spotify: $url');
+    }
+
+    switch (parsed.type) {
+      case 'track':
+        final track = await fetchSingleTrack(parsed.id);
+        return PlaylistInfo(
+          id: track.id,
+          type: 'track',
+          title: track.title,
+          description: track.artist,
+          ownerName: track.artist,
+          coverUrl: track.coverUrl,
+          tracks: [track],
+          originalUrl: url,
+        );
+
+      case 'playlist':
+        return await fetchPlaylistOrAlbum(
+          id: parsed.id,
+          type: 'playlist',
+          originalUrl: url,
+        );
+
+      case 'album':
+        return await fetchPlaylistOrAlbum(
+          id: parsed.id,
+          type: 'album',
+          originalUrl: url,
+        );
+
+      default:
+        throw UnsupportedError('Неподдерживаемый тип сущности: ${parsed.type}');
+    }
+  }
+
+  /// Fetches single track metadata with 3-tier fallback.
+  Future<TrackItem> fetchSingleTrack(String trackId) async {
+    // --- Tier 1: Embed __NEXT_DATA__ ---
+    try {
+      final embedUrl = Uri.parse('https://open.spotify.com/embed/track/$trackId');
+      final res = await _client.get(embedUrl, headers: {
+        'User-Agent': AppConstants.browserUserAgent,
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+      }).timeout(const Duration(seconds: 8));
+
+      if (res.statusCode == 200) {
+        final track = _parseNextDataSingleTrack(res.body, trackId);
+        if (track != null) return track;
+      }
+    } catch (_) {}
+
+    // --- Tier 2: OpenGraph Crawler fallback ---
+    try {
+      final trackUrl = Uri.parse('https://open.spotify.com/track/$trackId');
+      final res = await _client.get(trackUrl, headers: {
+        'User-Agent': AppConstants.crawlerUserAgent,
+      }).timeout(const Duration(seconds: 8));
+
+      if (res.statusCode == 200) {
+        final track = _parseOpenGraphTrack(res.body, trackId);
+        if (track != null) return track;
+      }
+    } catch (_) {}
+
+    // --- Tier 3: oEmbed API fallback ---
+    try {
+      final oeUrl = Uri.parse(
+          'https://open.spotify.com/oembed?url=https://open.spotify.com/track/$trackId');
+      final res = await _client.get(oeUrl).timeout(const Duration(seconds: 6));
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final rawTitle = (data['title'] as String? ?? '').trim();
+        final coverUrl = (data['thumbnail_url'] as String? ?? '').trim();
+
+        String artist = 'Spotify Artist';
+        String title = rawTitle;
+        if (rawTitle.contains(' - ')) {
+          final parts = rawTitle.split(' - ');
+          artist = parts[0].trim();
+          title = parts.sublist(1).join(' - ').trim();
+        }
+
+        return TrackItem(
+          id: trackId,
+          title: title.isNotEmpty ? title : 'Трек $trackId',
+          artist: artist,
+          coverUrl: coverUrl,
+          trackNumber: 1,
+        );
+      }
+    } catch (_) {}
+
+    // Fallback if all attempts fail
+    return TrackItem(
+      id: trackId,
+      title: 'Трек $trackId',
+      artist: 'Неизвестный исполнитель',
+      trackNumber: 1,
+    );
+  }
+
+  /// Fetches playlist or album tracks from embed page.
+  Future<PlaylistInfo> fetchPlaylistOrAlbum({
+    required String id,
+    required String type,
+    required String originalUrl,
+  }) async {
+    final embedUrl = Uri.parse('https://open.spotify.com/embed/$type/$id');
+    final res = await _client.get(embedUrl, headers: {
+      'User-Agent': AppConstants.browserUserAgent,
+      'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    }).timeout(const Duration(seconds: 12));
+
+    if (res.statusCode == 200) {
+      final parsed = _parseNextDataCollection(res.body, id, type, originalUrl);
+      if (parsed != null && parsed.tracks.isNotEmpty) {
+        return parsed;
+      }
+    }
+
+    // Fallback to oEmbed if embed page didn't yield tracklist
+    try {
+      final oeUrl = Uri.parse(
+          'https://open.spotify.com/oembed?url=https://open.spotify.com/$type/$id');
+      final res = await _client.get(oeUrl).timeout(const Duration(seconds: 8));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final title = (data['title'] as String? ?? 'Плейлист').trim();
+        final coverUrl = (data['thumbnail_url'] as String? ?? '').trim();
+
+        return PlaylistInfo(
+          id: id,
+          type: type,
+          title: title,
+          coverUrl: coverUrl,
+          tracks: const [],
+          originalUrl: originalUrl,
+        );
+      }
+    } catch (_) {}
+
+    return PlaylistInfo(
+      id: id,
+      type: type,
+      title: type == 'album' ? 'Альбом $id' : 'Плейлист $id',
+      tracks: const [],
+      originalUrl: originalUrl,
+    );
+  }
+
+  // --- Internal Parsers ---
+
+  TrackItem? _parseNextDataSingleTrack(String html, String trackId) {
+    try {
+      final jsonString = _extractNextDataJson(html);
+      if (jsonString == null) return null;
+
+      final data = jsonDecode(jsonString) as Map<String, dynamic>;
+      final entity = data['props']?['pageProps']?['state']?['data']?['entity']
+          as Map<String, dynamic>?;
+
+      if (entity == null) return null;
+
+      final title = (entity['name'] ?? entity['title']) as String?;
+      if (title == null || title.isEmpty) return null;
+
+      final artistsList = entity['artists'] as List<dynamic>? ?? [];
+      final artists = artistsList
+          .map((a) => (a is Map ? a['name'] as String? : null))
+          .where((name) => name != null && name.isNotEmpty)
+          .join(', ');
+
+      final album = entity['album']?['name'] as String? ?? '';
+
+      // High-res cover art selection
+      String coverUrl = '';
+      final images = entity['visualIdentity']?['image'] as List<dynamic>? ?? [];
+      if (images.isNotEmpty) {
+        images.sort((a, b) {
+          final wa = (a is Map ? a['maxWidth'] as int? : 0) ?? 0;
+          final wb = (b is Map ? b['maxWidth'] as int? : 0) ?? 0;
+          return wb.compareTo(wa);
+        });
+        coverUrl = (images.first as Map)['url'] as String? ?? '';
+      }
+
+      final durationMs = (entity['duration'] as int?) ?? 0;
+
+      return TrackItem(
+        id: trackId,
+        title: title.trim(),
+        artist: artists.isNotEmpty ? artists : 'Неизвестный исполнитель',
+        album: album.trim(),
+        coverUrl: coverUrl,
+        durationMs: durationMs,
+        trackNumber: 1,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  PlaylistInfo? _parseNextDataCollection(
+    String html,
+    String id,
+    String type,
+    String originalUrl,
+  ) {
+    try {
+      final jsonString = _extractNextDataJson(html);
+      if (jsonString == null) return null;
+
+      final data = jsonDecode(jsonString) as Map<String, dynamic>;
+      final entity = data['props']?['pageProps']?['state']?['data']?['entity']
+          as Map<String, dynamic>?;
+
+      if (entity == null) return null;
+
+      final title = (entity['name'] ?? entity['title'] ?? 'Коллекция') as String;
+      final description = (entity['description'] ?? '') as String;
+      final owner = (entity['owner']?['name'] ?? entity['creator']?['name'] ?? '') as String;
+
+      // Extract cover image
+      String coverUrl = '';
+      final images = entity['visualIdentity']?['image'] as List<dynamic>? ?? [];
+      if (images.isNotEmpty) {
+        images.sort((a, b) {
+          final wa = (a is Map ? a['maxWidth'] as int? : 0) ?? 0;
+          final wb = (b is Map ? b['maxWidth'] as int? : 0) ?? 0;
+          return wb.compareTo(wa);
+        });
+        coverUrl = (images.first as Map)['url'] as String? ?? '';
+      }
+
+      final trackListRaw = (entity['trackList'] as List<dynamic>?) ?? [];
+      final List<TrackItem> tracks = [];
+
+      for (int i = 0; i < trackListRaw.length; i++) {
+        final item = trackListRaw[i] as Map<String, dynamic>;
+        final trackTitle = (item['title'] ?? item['name'] ?? '') as String;
+        if (trackTitle.isEmpty) continue;
+
+        final trackSubtitle = (item['subtitle'] ?? '') as String;
+        final trackDuration = (item['duration'] as int?) ?? 0;
+
+        // Try extracting Spotify track ID from item uri (e.g. spotify:track:...)
+        final uri = item['uri'] as String? ?? '';
+        final trackIdMatch = RegExp(r'track:([a-zA-Z0-9]{22})').firstMatch(uri);
+        final trackId = trackIdMatch?.group(1) ?? 'track_${id}_${i + 1}';
+
+        tracks.add(
+          TrackItem(
+            id: trackId,
+            title: trackTitle.trim(),
+            artist: trackSubtitle.isNotEmpty ? trackSubtitle : 'Spotify Track',
+            album: title,
+            coverUrl: coverUrl,
+            durationMs: trackDuration,
+            trackNumber: i + 1,
+            isSelected: true,
+          ),
+        );
+      }
+
+      return PlaylistInfo(
+        id: id,
+        type: type,
+        title: title.trim(),
+        description: description.trim(),
+        ownerName: owner.trim(),
+        coverUrl: coverUrl,
+        tracks: tracks,
+        originalUrl: originalUrl,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  TrackItem? _parseOpenGraphTrack(String html, String trackId) {
+    try {
+      final titleMatch = RegExp(
+        r'<meta\s+property=["' "'" r']og:title["' "'" r']\s+content=["' "'" r']([^"' "'" r']*)["' "'" r']',
+        caseSensitive: false,
+      ).firstMatch(html);
+
+      final descMatch = RegExp(
+        r'<meta\s+property=["' "'" r']og:description["' "'" r']\s+content=["' "'" r']([^"' "'" r']*)["' "'" r']',
+        caseSensitive: false,
+      ).firstMatch(html);
+
+      final imageMatch = RegExp(
+        r'<meta\s+property=["' "'" r']og:image["' "'" r']\s+content=["' "'" r']([^"' "'" r']*)["' "'" r']',
+        caseSensitive: false,
+      ).firstMatch(html);
+
+      final title = titleMatch?.group(1)?.trim() ?? '';
+      if (title.isEmpty) return null;
+
+      final desc = descMatch?.group(1)?.trim() ?? '';
+      final coverUrl = imageMatch?.group(1)?.trim() ?? '';
+
+      String artist = 'Неизвестный исполнитель';
+      String album = '';
+
+      if (desc.isNotEmpty) {
+        final parts = desc.contains(' · ') ? desc.split(' · ') : desc.split(' - ');
+        if (parts.isNotEmpty) artist = parts[0].trim();
+        if (parts.length > 1) album = parts[1].trim();
+      }
+
+      return TrackItem(
+        id: trackId,
+        title: title,
+        artist: artist,
+        album: album,
+        coverUrl: coverUrl,
+        trackNumber: 1,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? _extractNextDataJson(String html) {
+    final scriptRegex = RegExp(
+      r'<script\s+id=["' "'" r']__NEXT_DATA__["' "'" r']\s+type=["' "'" r']application/json["' "'" r']>([\s\S]*?)</script>',
+      caseSensitive: false,
+    );
+    final match = scriptRegex.firstMatch(html);
+    return match?.group(1)?.trim();
+  }
+}
+
+
+// ==================== mobile\lib\core\storage\media_store_helper.dart ====================
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import '../constants/app_constants.dart';
+import '../youtube/track_title_cleaner.dart';
+
+class MediaStoreHelper {
+  /// Resolves the target directory for downloaded tracks.
+  /// On Android, attempts to write to `/storage/emulated/0/Music/SpotiPars`,
+  /// with a graceful fallback to external app storage if system permissions restrict it.
+  static Future<Directory> getMusicDirectory({String subFolder = ''}) async {
+    Directory baseDir;
+
+    if (Platform.isAndroid) {
+      try {
+        final standardMusicDir = Directory('/storage/emulated/0/Music');
+        if (await standardMusicDir.exists()) {
+          final spotiparsFolder = Directory(p.join(standardMusicDir.path, 'SpotiPars'));
+          if (!await spotiparsFolder.exists()) {
+            await spotiparsFolder.create(recursive: true);
+          }
+          baseDir = standardMusicDir;
+        } else {
+          final extDir = await getExternalStorageDirectory();
+          baseDir = extDir ?? await getApplicationDocumentsDirectory();
+        }
+      } catch (e) {
+        debugPrint('Fallback storage used due to: $e');
+        final extDir = await getExternalStorageDirectory();
+        baseDir = extDir ?? await getApplicationDocumentsDirectory();
+      }
+    } else {
+      baseDir = await getApplicationDocumentsDirectory();
+    }
+
+    String fullPath = p.join(baseDir.path, 'SpotiPars');
+    if (subFolder.isNotEmpty) {
+      final safeSub = TrackTitleCleaner.sanitizeFilename(subFolder, maxLength: 60);
+      fullPath = p.join(fullPath, safeSub);
+    }
+
+    final targetDir = Directory(fullPath);
+    if (!await targetDir.exists()) {
+      await targetDir.create(recursive: true);
+    }
+    return targetDir;
+  }
+
+  /// Checks if track is already downloaded and valid in target directory.
+  static Future<File?> findExistingTrackFile({
+    required Directory directory,
+    required String artist,
+    required String title,
+    required String ext,
+  }) async {
+    if (!await directory.exists()) return null;
+
+    final safeArtist = TrackTitleCleaner.sanitizeFilename(artist, maxLength: 50).toLowerCase();
+    final safeTitle = TrackTitleCleaner.sanitizeFilename(title, maxLength: 70).toLowerCase();
+    final cleanExt = ext.replaceAll('.', '').toLowerCase();
+    final targetSuffix = '$safeArtist - $safeTitle.$cleanExt';
+
+    try {
+      final entities = directory.listSync();
+      for (final entity in entities) {
+        if (entity is File) {
+          final filename = p.basename(entity.path).toLowerCase();
+          if (filename.endsWith(targetSuffix) ||
+              filename == '$safeArtist - $safeTitle.$cleanExt') {
+            final length = await entity.length();
+            if (length > AppConstants.minExistingFileSize) {
+              return entity;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+}
+
+
+// ==================== mobile\lib\core\tagger\id3_tagger.dart ====================
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:http/http.dart' as http;
+import '../models/track_item.dart';
+
+class Id3Tagger {
+  final http.Client _client;
+
+  Id3Tagger({http.Client? client}) : _client = client ?? http.Client();
+
+  /// Downloads cover art image as bytes.
+  Future<Uint8List?> fetchCoverBytes(String coverUrl) async {
+    if (coverUrl.isEmpty) return null;
+    try {
+      final res = await _client.get(Uri.parse(coverUrl)).timeout(
+            const Duration(seconds: 10),
+          );
+      if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+        return res.bodyBytes;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Injects ID3v2.3 metadata (Title, Artist, Album, Track No, and JPEG APIC Cover)
+  /// into an MP3 file using pure Dart.
+  Future<void> tagMp3File(
+    File audioFile,
+    TrackItem track, {
+    Uint8List? coverBytes,
+  }) async {
+    if (!await audioFile.exists()) return;
+
+    coverBytes ??= await fetchCoverBytes(track.coverUrl);
+
+    final rawAudioBytes = await audioFile.readAsBytes();
+
+    // Guard against corrupting non-MP3 containers (MP4/M4A/AAC and WebM/Opus).
+    // Prepending raw ID3v2 tags to an MP4 container displaces the 'ftyp' atom and
+    // invalidates the 'stco' chunk offset table, rendering the file unplayable.
+    if (rawAudioBytes.length >= 8) {
+      final isMp4 = rawAudioBytes[4] == 0x66 && // 'f'
+          rawAudioBytes[5] == 0x74 && // 't'
+          rawAudioBytes[6] == 0x79 && // 'y'
+          rawAudioBytes[7] == 0x70; // 'p'
+      final isWebM = rawAudioBytes[0] == 0x1A &&
+          rawAudioBytes[1] == 0x45 &&
+          rawAudioBytes[2] == 0xDF &&
+          rawAudioBytes[3] == 0xA3;
+      if (isMp4 || isWebM) {
+        // Container is MP4 or WebM; keep container byte integrity intact.
+        return;
+      }
+    }
+
+    // Check if file already has an ID3v2 tag at the start and strip it
+    int audioStartIndex = 0;
+    if (rawAudioBytes.length >= 10 &&
+        rawAudioBytes[0] == 0x49 && // 'I'
+        rawAudioBytes[1] == 0x44 && // 'D'
+        rawAudioBytes[2] == 0x33) { // '3'
+      final tagSize = _decodeSynchsafeInt(
+        rawAudioBytes[6],
+        rawAudioBytes[7],
+        rawAudioBytes[8],
+        rawAudioBytes[9],
+      );
+      audioStartIndex = 10 + tagSize;
+      if (audioStartIndex > rawAudioBytes.length) {
+        audioStartIndex = 0;
+      }
+    }
+
+    final cleanAudioData = audioStartIndex > 0
+        ? rawAudioBytes.sublist(audioStartIndex)
+        : rawAudioBytes;
+
+    final id3v2Block = _buildId3v23TagBlock(
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      trackNumber: track.trackNumber,
+      coverBytes: coverBytes,
+    );
+
+    final output = BytesBuilder(copy: false)
+      ..add(id3v2Block)
+      ..add(cleanAudioData);
+
+    await audioFile.writeAsBytes(output.takeBytes(), flush: true);
+  }
+
+  // --- ID3v2.3 Builder Helpers ---
+
+  Uint8List _buildId3v23TagBlock({
+    required String title,
+    required String artist,
+    required String album,
+    required int trackNumber,
+    Uint8List? coverBytes,
+  }) {
+    final framesBuilder = BytesBuilder();
+
+    // Text frames encoded in UTF-16 with BOM (encoding byte 0x01)
+    if (title.isNotEmpty) {
+      framesBuilder.add(_buildTextFrame('TIT2', title));
+    }
+    if (artist.isNotEmpty) {
+      framesBuilder.add(_buildTextFrame('TPE1', artist));
+    }
+    if (album.isNotEmpty) {
+      framesBuilder.add(_buildTextFrame('TALB', album));
+    }
+    framesBuilder.add(_buildTextFrame('TRCK', trackNumber.toString()));
+
+    // APIC (Attached Picture)
+    if (coverBytes != null && coverBytes.isNotEmpty) {
+      framesBuilder.add(_buildApicFrame(coverBytes));
+    }
+
+    final framesData = framesBuilder.takeBytes();
+    final totalTagSize = framesData.length;
+
+    final header = Uint8List(10);
+    // 'ID3'
+    header[0] = 0x49;
+    header[1] = 0x44;
+    header[2] = 0x33;
+    // Version 2.3.0
+    header[3] = 0x03;
+    header[4] = 0x00;
+    // Flags: 0
+    header[5] = 0x00;
+    // 4-byte Synchsafe integer size
+    final synchsafe = _encodeSynchsafeInt(totalTagSize);
+    header[6] = synchsafe[0];
+    header[7] = synchsafe[1];
+    header[8] = synchsafe[2];
+    header[9] = synchsafe[3];
+
+    return (BytesBuilder()
+          ..add(header)
+          ..add(framesData))
+        .takeBytes();
+  }
+
+  Uint8List _buildTextFrame(String frameId, String text) {
+    // Encoding 0x01: UTF-16 with BOM (\xFF\xFE in Little Endian)
+    final bom = [0xFF, 0xFE];
+    final textUnits = <int>[];
+    for (final char in text.codeUnits) {
+      textUnits.add(char & 0xFF);
+      textUnits.add((char >> 8) & 0xFF);
+    }
+
+    final payload = (BytesBuilder()
+          ..addByte(0x01) // UTF-16
+          ..add(bom)
+          ..add(textUnits))
+        .takeBytes();
+
+    final frame = BytesBuilder();
+    frame.add(utf8.encode(frameId)); // 4 bytes Frame ID
+
+    // 4 bytes Size (non-synchsafe in ID3v2.3)
+    final size = payload.length;
+    frame.add([
+      (size >> 24) & 0xFF,
+      (size >> 16) & 0xFF,
+      (size >> 8) & 0xFF,
+      size & 0xFF,
+    ]);
+
+    // 2 bytes Flags
+    frame.add([0x00, 0x00]);
+
+    // Payload
+    frame.add(payload);
+
+    return frame.takeBytes();
+  }
+
+  Uint8List _buildApicFrame(Uint8List imageBytes) {
+    final mime = utf8.encode('image/jpeg');
+
+    final payload = (BytesBuilder()
+          ..addByte(0x00) // Encoding: ISO-8859-1 for mime and desc
+          ..add(mime)
+          ..addByte(0x00) // Mime terminator
+          ..addByte(0x03) // Picture type: 0x03 = Front Cover
+          ..addByte(0x00) // Empty description terminator
+          ..add(imageBytes))
+        .takeBytes();
+
+    final frame = BytesBuilder();
+    frame.add(utf8.encode('APIC'));
+
+    final size = payload.length;
+    frame.add([
+      (size >> 24) & 0xFF,
+      (size >> 16) & 0xFF,
+      (size >> 8) & 0xFF,
+      size & 0xFF,
+    ]);
+
+    frame.add([0x00, 0x00]); // Flags
+    frame.add(payload);
+
+    return frame.takeBytes();
+  }
+
+  List<int> _encodeSynchsafeInt(int value) {
+    return [
+      (value >> 21) & 0x7F,
+      (value >> 14) & 0x7F,
+      (value >> 7) & 0x7F,
+      value & 0x7F,
+    ];
+  }
+
+  int _decodeSynchsafeInt(int b0, int b1, int b2, int b3) {
+    return ((b0 & 0x7F) << 21) |
+        ((b1 & 0x7F) << 14) |
+        ((b2 & 0x7F) << 7) |
+        (b3 & 0x7F);
+  }
+}
+
+
+// ==================== mobile\lib\core\youtube\track_title_cleaner.dart ====================
+class TrackTitleCleaner {
+  static final RegExp _remasterDash = RegExp(
+    r'\s*[-–—]\s*(?:\d{4}\s*)?Remaster(?:ed)?.*',
+    caseSensitive: false,
+  );
+
+  static final RegExp _remasterParen = RegExp(
+    r'\s*[\(\[].*?Remaster(?:ed)?.*?[\)\]]',
+    caseSensitive: false,
+  );
+
+  static final RegExp _deluxeParen = RegExp(
+    r'\s*[\(\[].*?Deluxe.*?[\)\]]',
+    caseSensitive: false,
+  );
+
+  static final RegExp _singleParen = RegExp(
+    r'\s*[-–—]\s*Single\s*Version.*|\s*[\(\[].*?Single\s*Version.*?[\)\]]',
+    caseSensitive: false,
+  );
+
+  static final RegExp _punctuation = RegExp(r'[?!]');
+
+  static final RegExp _invalidFilenameChars = RegExp(r'[\\/*?:"<>|]');
+
+  /// Cleans track title by stripping remaster tags, deluxe mentions, and confusing punctuation.
+  static String cleanTrackTitle(String title) {
+    if (title.isEmpty) return '';
+
+    String cleaned = title;
+    cleaned = cleaned.replaceAll(_remasterDash, '');
+    cleaned = cleaned.replaceAll(_remasterParen, '');
+    cleaned = cleaned.replaceAll(_deluxeParen, '');
+    cleaned = cleaned.replaceAll(_singleParen, '');
+    cleaned = cleaned.replaceAll(_punctuation, '');
+    cleaned = cleaned.trim();
+
+    return cleaned.isNotEmpty ? cleaned : title;
+  }
+
+  /// Sanitizes string for safe file naming on Android filesystem.
+  static String sanitizeFilename(String name, {int maxLength = 90}) {
+    if (name.isEmpty) return 'Track';
+
+    var clean = name.replaceAll(_invalidFilenameChars, '');
+    clean = clean.replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '');
+    clean = clean.replaceAll(RegExp(r'^[.\s]+|[.\s]+$'), '');
+
+    if (clean.isEmpty) clean = 'Track';
+
+    if (clean.length > maxLength) {
+      clean = clean.substring(0, maxLength).trim();
+    }
+    return clean;
+  }
+
+  /// Builds a complete safe filename.
+  static String buildFilename({
+    required int trackNumber,
+    required String artist,
+    required String title,
+    required String ext,
+    bool includeNumber = true,
+    int totalTracks = 0,
+  }) {
+    final safeArtist = sanitizeFilename(artist, maxLength: 50);
+    final safeTitle = sanitizeFilename(title, maxLength: 70);
+    final cleanExt = ext.replaceAll('.', '').toLowerCase();
+
+    final padWidth = totalTracks > 99 ? 3 : 2;
+    final numStr = trackNumber.toString().padLeft(padWidth, '0');
+
+    if (includeNumber) {
+      return '$numStr. $safeArtist - $safeTitle.$cleanExt';
+    }
+    return '$safeArtist - $safeTitle.$cleanExt';
+  }
+}
+
+
+// ==================== mobile\lib\core\youtube\youtube_search_engine.dart ====================
+import 'dart:async';
+import 'package:youtube_explode_dart/youtube_explode_dart.dart';
+import '../constants/app_constants.dart';
+import '../models/track_item.dart';
+import 'track_title_cleaner.dart';
+
+class YouTubeMatchResult {
+  final Video video;
+  final StreamInfo streamInfo;
+  final String queryUsed;
+
+  const YouTubeMatchResult({
+    required this.video,
+    required this.streamInfo,
+    required this.queryUsed,
+  });
+}
+
+class YouTubeSearchEngine {
+  YoutubeExplode _yt;
+
+  YouTubeSearchEngine({YoutubeExplode? yt}) : _yt = yt ?? YoutubeExplode();
+
+  void updateClient(YoutubeExplode yt) {
+    _yt = yt;
+  }
+
+  /// Executes cascade search on YouTube and returns the best valid audio stream.
+  Future<YouTubeMatchResult?> findBestAudioStream(
+    TrackItem track, {
+    void Function(String message)? onStatusUpdate,
+  }) async {
+    final cleanTitle = TrackTitleCleaner.cleanTrackTitle(track.title);
+    final artist = track.artist;
+
+    // Prioritized search queries:
+    // 1. Lyrics query: user uploads, no YouTube Topic DRM / PO-Token restriction, original audio
+    // 2. Official audio query
+    // 3. Audio query
+    // 4. Artist + song
+    final queries = [
+      '$artist - $cleanTitle lyrics',
+      '$artist - $cleanTitle official audio',
+      '$artist - $cleanTitle audio',
+      '$artist $cleanTitle',
+    ];
+
+    if (cleanTitle.toLowerCase() != track.title.toLowerCase()) {
+      queries.add('$artist - ${track.title}');
+    }
+
+    final visitedVideoIds = <String>{};
+
+    for (int qIdx = 0; qIdx < queries.length; qIdx++) {
+      final query = queries[qIdx];
+      if (qIdx > 0) {
+        // Polite delay between cascade queries to prevent rate-limiting
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+
+      onStatusUpdate?.call('Поиск: "$query"...');
+
+      try {
+        final searchResults = await _yt.search
+            .search(query)
+            .timeout(const Duration(seconds: 12));
+        final candidates = searchResults.take(4).toList();
+
+        for (int cIdx = 0; cIdx < candidates.length; cIdx++) {
+          final video = candidates[cIdx];
+          if (visitedVideoIds.contains(video.id.value)) continue;
+          visitedVideoIds.add(video.id.value);
+
+          // Verify video duration if track duration is known (avoid 10h loops or snippets)
+          if (video.duration != null) {
+            final videoSec = video.duration!.inSeconds;
+            if (videoSec < 20 || videoSec > 1200) {
+              continue;
+            }
+            if (track.durationMs > 0) {
+              final trackSec = track.durationMs ~/ 1000;
+              if ((videoSec - trackSec).abs() > 60) {
+                continue;
+              }
+            }
+          }
+
+          if (cIdx > 0) {
+            await Future.delayed(const Duration(milliseconds: 250));
+          }
+
+          try {
+            // Uses default androidSdkless client in youtube_explode_dart 3.1.0
+            final manifest = await _yt.videos.streamsClient
+                .getManifest(video.id)
+                .timeout(const Duration(seconds: 12));
+
+            // Filter out HLS/m3u8 stubs and small files (< 500 KB)
+            bool isValidStream(StreamInfo s) {
+              if (s is HlsAudioStreamInfo ||
+                  s is HlsMuxedStreamInfo ||
+                  s is HlsVideoStreamInfo) {
+                return false;
+              }
+              final containerName = s.container.name.toLowerCase();
+              if (containerName.contains('m3u8') || containerName.contains('hls')) {
+                return false;
+              }
+              if (s.size.totalBytes < AppConstants.minValidAudioBytes) {
+                return false;
+              }
+              return true;
+            }
+
+            final validMuxed = manifest.muxed.where(isValidStream);
+            final validAudioOnly = manifest.audioOnly.where(isValidStream);
+
+            // 1. Prioritize muxed streams (itag 18 AAC) because YouTube's adaptive
+            // audioOnly streams currently return HTTP 403 Forbidden without PO-Token.
+            // Muxed streams bypass 403 blocks and stream immediately.
+            StreamInfo? bestAudio;
+            if (validMuxed.isNotEmpty) {
+              bestAudio = validMuxed.withHighestBitrate();
+            } else if (validAudioOnly.isNotEmpty) {
+              bestAudio = validAudioOnly.withHighestBitrate();
+            }
+
+            if (bestAudio == null) continue;
+
+            return YouTubeMatchResult(
+              video: video,
+              streamInfo: bestAudio,
+              queryUsed: query,
+            );
+          } on RequestLimitExceededException {
+            // Rethrow so the download manager can back off and cool down
+            rethrow;
+          } catch (_) {
+            // Video might have restrictions or DRM, continue cascade
+            continue;
+          }
+        }
+      } on RequestLimitExceededException {
+        // Rethrow rate limit exception immediately
+        rethrow;
+      } catch (_) {
+        // Query failed, proceed to next query in cascade
+        continue;
+      }
+    }
+
+    return null;
+  }
+
+  void close() {
+    _yt.close();
+  }
+}
+
+
+// ==================== mobile\lib\services\foreground_download_service.dart ====================
+import 'dart:io';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import '../core/constants/app_constants.dart';
+
+class ForegroundDownloadService {
+  static bool _isInitialized = false;
+
+  static Future<void> initialize() async {
+    if (_isInitialized) return;
+
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: AppConstants.notificationChannelId,
+        channelName: AppConstants.notificationChannelName,
+        channelDescription: AppConstants.notificationChannelDesc,
+        channelImportance: NotificationChannelImportance.LOW,
+        priority: NotificationPriority.LOW,
+        iconData: const NotificationIconData(
+          resType: ResourceType.mipmap,
+          resPrefix: ResourcePrefix.ic,
+          name: 'launcher',
+        ),
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(
+        showNotification: false,
+        playSound: false,
+      ),
+      foregroundTaskOptions: const ForegroundTaskOptions(
+        interval: 5000,
+        isOnceEvent: false,
+        autoRunOnBoot: false,
+        allowWakeLock: true,
+        allowWifiLock: true,
+      ),
+    );
+
+    _isInitialized = true;
+  }
+
+  static Future<bool> startForeground({
+    required String title,
+    required String text,
+  }) async {
+    if (!Platform.isAndroid) return false;
+
+    await initialize();
+
+    if (await FlutterForegroundTask.isRunningService) {
+      return await FlutterForegroundTask.updateService(
+        notificationTitle: title,
+        notificationText: text,
+      );
+    } else {
+      return await FlutterForegroundTask.startService(
+        notificationTitle: title,
+        notificationText: text,
+      );
+    }
+  }
+
+  static Future<void> updateProgress({
+    required String title,
+    required String text,
+  }) async {
+    if (!Platform.isAndroid) return;
+    if (await FlutterForegroundTask.isRunningService) {
+      await FlutterForegroundTask.updateService(
+        notificationTitle: title,
+        notificationText: text,
+      );
+    }
+  }
+
+  static Future<bool> stopForeground() async {
+    if (!Platform.isAndroid) return false;
+    if (await FlutterForegroundTask.isRunningService) {
+      return await FlutterForegroundTask.stopService();
+    }
+    return true;
+  }
+}
+
+
+// ==================== mobile\lib\services\share_intent_receiver.dart ====================
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import '../core/spotify/spotify_scraper.dart';
+
+class ShareIntentReceiver {
+  StreamSubscription? _intentSub;
+
+  void initialize({required void Function(String spotifyUrl) onLinkReceived}) {
+    // 1. Listen for incoming intents while app is running in background or foreground
+    _intentSub = ReceiveSharingIntent.instance.getMediaStream().listen(
+      (List<SharedMediaFile> value) {
+        for (final item in value) {
+          _handleIncomingText(item.path, onLinkReceived);
+        }
+      },
+      onError: (err) {
+        debugPrint('Error listening to sharing intent: $err');
+      },
+    );
+
+    // 2. Handle intent that opened the app from a terminated state
+    ReceiveSharingIntent.instance.getInitialMedia().then(
+      (List<SharedMediaFile> value) {
+        for (final item in value) {
+          _handleIncomingText(item.path, onLinkReceived);
+        }
+        ReceiveSharingIntent.instance.reset();
+      },
+    ).catchError((err) {
+      debugPrint('Error getting initial sharing intent: $err');
+    });
+  }
+
+  void _handleIncomingText(
+    String text,
+    void Function(String spotifyUrl) onLinkReceived,
+  ) {
+    if (text.isEmpty) return;
+
+    // Check if shared text contains a valid Spotify URL
+    final parsed = SpotifyScraper.parseUrl(text);
+    if (parsed != null) {
+      onLinkReceived(text.trim());
+    }
+  }
+
+  void dispose() {
+    _intentSub?.cancel();
+  }
+}
+
+
+// ==================== mobile\lib\ui\screens\home_screen.dart ====================
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../core/constants/app_constants.dart';
+import '../../core/downloader/audio_download_manager.dart';
+import '../../core/spotify/spotify_scraper.dart';
+import '../theme/spotify_theme.dart';
+import '../widgets/format_selector_chips.dart';
+import 'preview_screen.dart';
+
+class HomeScreen extends ConsumerStatefulWidget {
+  final AudioDownloadManager? downloadManager;
+  final VoidCallback? onNavigateToQueue;
+
+  const HomeScreen({
+    Key? key,
+    this.downloadManager,
+    this.onNavigateToQueue,
+  }) : super(key: key);
+
+  @override
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  final TextEditingController _urlController = TextEditingController();
+  final SpotifyScraper _scraper = SpotifyScraper();
+
+  bool _isLoading = false;
+  String _selectedFormat = AppConstants.formatMp3;
+  bool _createSubfolder = true;
+  String? _errorMessage;
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pasteFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (data?.text != null && data!.text!.isNotEmpty) {
+      setState(() {
+        _urlController.text = data.text!.trim();
+        _errorMessage = null;
+      });
+      _parseAndNavigate();
+    }
+  }
+
+  Future<void> _parseAndNavigate() async {
+    final input = _urlController.text.trim();
+    if (input.isEmpty) {
+      setState(() => _errorMessage = 'Вставьте ссылку на трек или плейлист');
+      return;
+    }
+
+    final parsed = SpotifyScraper.parseUrl(input);
+    if (parsed == null) {
+      setState(() => _errorMessage = 'Некорректная ссылка Spotify');
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final playlistInfo = await _scraper.fetchEntity(input);
+      if (!mounted) return;
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => PreviewScreen(
+            playlistInfo: playlistInfo,
+            audioFormat: _selectedFormat,
+            createSubfolder: _createSubfolder,
+            downloadManager: widget.downloadManager ?? AudioDownloadManager.instance,
+            onStartDownload: widget.onNavigateToQueue,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      final errorStr = e.toString();
+      setState(() {
+        _errorMessage = 'Сбой: $errorStr';
+      });
+
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: SpotifyTheme.surface,
+          title: Row(
+            children: const [
+              Icon(Icons.error_outline, color: SpotifyTheme.error, size: 24),
+              SizedBox(width: 8),
+              Text(
+                'Сбой загрузки данных',
+                style: TextStyle(color: SpotifyTheme.textPrimary, fontSize: 16),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Не удалось получить метаданные по ссылке Spotify.',
+                style: TextStyle(color: SpotifyTheme.textSecondary, fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: SpotifyTheme.surfaceElevated,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+                ),
+                child: SelectableText(
+                  errorStr,
+                  style: const TextStyle(
+                    color: SpotifyTheme.error,
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Рекомендации:\n'
+                '• Убедитесь, что интернет работает на телефоне\n'
+                '• Если Spotify блокируется оператором, включите VPN\n'
+                '• Проверьте, что ссылка не из приватного плейлиста',
+                style: TextStyle(
+                  color: SpotifyTheme.textSecondary,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Понятно', style: TextStyle(color: SpotifyTheme.spotifyGreen)),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: SpotifyTheme.spotifyGreen,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.music_note, color: Colors.black, size: 20),
+            ),
+            const SizedBox(width: 10),
+            const Text('SpotiPars Mobile'),
+          ],
+        ),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Welcome & Description Card
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: SpotifyTheme.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text(
+                    'Скачивайте музыку из Spotify',
+                    style: TextStyle(
+                      color: SpotifyTheme.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 6),
+                  Text(
+                    'Вставьте ссылку на трек, альбом или плейлист, либо нажмите «Поделиться» в официальном приложении Spotify.',
+                    style: TextStyle(
+                      color: SpotifyTheme.textSecondary,
+                      fontSize: 13,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 20),
+
+            // Input field
+            TextField(
+              controller: _urlController,
+              style: const TextStyle(color: SpotifyTheme.textPrimary),
+              decoration: InputDecoration(
+                hintText: 'https://open.spotify.com/playlist/...',
+                prefixIcon: const Icon(
+                  Icons.link,
+                  color: SpotifyTheme.spotifyGreen,
+                ),
+                suffixIcon: _urlController.text.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear, color: SpotifyTheme.textSecondary),
+                        onPressed: () {
+                          setState(() {
+                            _urlController.clear();
+                            _errorMessage = null;
+                          });
+                        },
+                      )
+                    : null,
+              ),
+              onSubmitted: (_) => _parseAndNavigate(),
+            ),
+
+            if (_errorMessage != null) ...[
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  _errorMessage!,
+                  style: const TextStyle(
+                    color: SpotifyTheme.error,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 12),
+
+            // Paste from clipboard button
+            OutlinedButton.icon(
+              onPressed: _isLoading ? null : _pasteFromClipboard,
+              icon: const Icon(Icons.content_paste, size: 18),
+              label: const Text('Вставить из буфера'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: SpotifyTheme.textPrimary,
+                side: const BorderSide(color: SpotifyTheme.borderColor),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            // Audio Format Selection
+            const Text(
+              'Формат аудио',
+              style: TextStyle(
+                color: SpotifyTheme.textPrimary,
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            FormatSelectorChips(
+              selectedFormat: _selectedFormat,
+              onFormatChanged: (format) {
+                setState(() => _selectedFormat = format);
+              },
+            ),
+
+            const SizedBox(height: 16),
+
+            // Subfolder Toggle
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: SpotifyTheme.surface,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.folder_outlined, color: SpotifyTheme.spotifyGreen, size: 20),
+                      SizedBox(width: 10),
+                      Text(
+                        'Подпапка для плейлиста',
+                        style: TextStyle(
+                          color: SpotifyTheme.textPrimary,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Switch(
+                    value: _createSubfolder,
+                    activeColor: SpotifyTheme.spotifyGreen,
+                    onChanged: (val) => setState(() => _createSubfolder = val),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            // Submit / Action Button
+            ElevatedButton(
+              onPressed: _isLoading ? null : _parseAndNavigate,
+              child: _isLoading
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        color: Colors.black,
+                        strokeWidth: 2.5,
+                      ),
+                    )
+                  : const Text('Открыть и подготовить к загрузке'),
+            ),
+
+            const SizedBox(height: 28),
+
+            // Share feature instruction guide
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: SpotifyTheme.surfaceElevated.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.share, color: SpotifyTheme.spotifyGreen, size: 18),
+                      SizedBox(width: 8),
+                      Text(
+                        'Как скачивать в 1 клик из Spotify:',
+                        style: TextStyle(
+                          color: SpotifyTheme.textPrimary,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '1. В официальном приложении Spotify откройте любой трек или плейлист.\n'
+                    '2. Нажмите меню с тремя точками (⋮) ➔ «Поделиться».\n'
+                    '3. Выберите SpotiPars — загрузка откроется автоматически!',
+                    style: TextStyle(
+                      color: SpotifyTheme.textSecondary,
+                      fontSize: 12,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+// ==================== mobile\lib\ui\screens\preview_screen.dart ====================
+import 'package:flutter/material.dart';
+import '../../core/downloader/audio_download_manager.dart';
+import '../../core/models/playlist_info.dart';
+import '../../core/models/track_item.dart';
+import '../../services/foreground_download_service.dart';
+import '../theme/spotify_theme.dart';
+import '../widgets/track_list_tile.dart';
+
+class PreviewScreen extends StatefulWidget {
+  final PlaylistInfo playlistInfo;
+  final String audioFormat;
+  final bool createSubfolder;
+  final AudioDownloadManager? downloadManager;
+  final VoidCallback? onStartDownload;
+
+  const PreviewScreen({
+    Key? key,
+    required this.playlistInfo,
+    required this.audioFormat,
+    required this.createSubfolder,
+    this.downloadManager,
+    this.onStartDownload,
+  }) : super(key: key);
+
+  @override
+  State<PreviewScreen> createState() => _PreviewScreenState();
+}
+
+class _PreviewScreenState extends State<PreviewScreen> {
+  late List<TrackItem> _tracks;
+
+  @override
+  void initState() {
+    super.initState();
+    _tracks = List.from(widget.playlistInfo.tracks);
+  }
+
+  bool get _isAllSelected =>
+      _tracks.isNotEmpty && _tracks.every((t) => t.isSelected);
+
+  int get _selectedCount => _tracks.where((t) => t.isSelected).length;
+
+  void _toggleSelectAll(bool select) {
+    setState(() {
+      _tracks = _tracks.map((t) => t.copyWith(isSelected: select)).toList();
+    });
+  }
+
+  void _toggleTrack(int index, bool selected) {
+    setState(() {
+      _tracks[index] = _tracks[index].copyWith(isSelected: selected);
+    });
+  }
+
+  Future<void> _startDownload() async {
+    final selected = _tracks.where((t) => t.isSelected).toList();
+    if (selected.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Выберите хотя бы один трек для загрузки'),
+          backgroundColor: SpotifyTheme.warning,
+        ),
+      );
+      return;
+    }
+
+    final manager = widget.downloadManager ?? AudioDownloadManager.instance;
+    manager.configure(
+      audioFormat: widget.audioFormat,
+      subFolder: widget.createSubfolder ? widget.playlistInfo.title : '',
+    );
+    manager.addTracks(selected);
+
+    try {
+      await ForegroundDownloadService.startForeground(
+        title: 'SpotiPars: Загрузка треков',
+        text: 'Скачивание ${selected.length} треков...',
+      );
+    } catch (e) {
+      debugPrint('Foreground download service start failed: $e');
+    }
+
+    if (!mounted) return;
+
+    Navigator.pop(context);
+    widget.onStartDownload?.call();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Добавлено в очередь: ${selected.length} треков'),
+        backgroundColor: SpotifyTheme.spotifyGreen,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final info = widget.playlistInfo;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          info.type == 'album'
+              ? 'Альбом'
+              : info.type == 'playlist'
+                  ? 'Плейлист'
+                  : 'Трек',
+        ),
+      ),
+      body: Column(
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            color: SpotifyTheme.surface,
+            child: Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: info.coverUrl.isNotEmpty
+                      ? Image.network(
+                          info.coverUrl,
+                          width: 80,
+                          height: 80,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => _coverFallback(),
+                        )
+                      : _coverFallback(),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        info.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: SpotifyTheme.textPrimary,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      if (info.ownerName.isNotEmpty)
+                        Text(
+                          info.ownerName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: SpotifyTheme.textSecondary,
+                            fontSize: 13,
+                          ),
+                        ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Всего треков: ${info.totalTracksCount} • Формат: ${widget.audioFormat.toUpperCase()}',
+                        style: const TextStyle(
+                          color: SpotifyTheme.spotifyGreen,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Select All Checkbox Row
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            decoration: const BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: SpotifyTheme.borderColor, width: 0.5),
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Checkbox(
+                      value: _isAllSelected,
+                      activeColor: SpotifyTheme.spotifyGreen,
+                      checkColor: Colors.black,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      onChanged: (val) => _toggleSelectAll(val ?? false),
+                    ),
+                    const Text(
+                      'Выбрать все',
+                      style: TextStyle(
+                        color: SpotifyTheme.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+                Text(
+                  'Выбрано: $_selectedCount из ${_tracks.length}',
+                  style: const TextStyle(
+                    color: SpotifyTheme.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Track List
+          Expanded(
+            child: _tracks.isEmpty
+                ? const Center(
+                    child: Text(
+                      'Список треков пуст',
+                      style: TextStyle(color: SpotifyTheme.textSecondary),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _tracks.length,
+                    itemBuilder: (context, index) {
+                      final track = _tracks[index];
+                      return TrackListTile(
+                        track: track,
+                        onToggleSelect: (val) => _toggleTrack(index, val),
+                      );
+                    },
+                  ),
+          ),
+
+          // Sticky Bottom Action Bar
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: const BoxDecoration(
+              color: SpotifyTheme.surface,
+              border: Border(
+                top: BorderSide(color: SpotifyTheme.borderColor, width: 0.5),
+              ),
+            ),
+            child: SafeArea(
+              child: ElevatedButton.icon(
+                onPressed: _selectedCount > 0 ? _startDownload : null,
+                icon: const Icon(Icons.download, color: Colors.black),
+                label: Text('Скачать выбранные ($_selectedCount)'),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _coverFallback() {
+    return Container(
+      width: 80,
+      height: 80,
+      color: SpotifyTheme.surfaceElevated,
+      child: const Icon(
+        Icons.album,
+        color: SpotifyTheme.textSecondary,
+        size: 36,
+      ),
+    );
+  }
+}
+
+
+// ==================== mobile\lib\ui\screens\queue_screen.dart ====================
+import 'package:flutter/material.dart';
+import '../../core/downloader/audio_download_manager.dart';
+import '../../core/models/download_item.dart';
+import '../theme/spotify_theme.dart';
+import '../widgets/download_progress_bar.dart';
+
+class QueueScreen extends StatelessWidget {
+  final AudioDownloadManager downloadManager;
+
+  const QueueScreen({Key? key, required this.downloadManager})
+      : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: downloadManager,
+      builder: (context, _) {
+        final queue = downloadManager.queue;
+        final finishedCount = queue
+            .where((i) =>
+                i.status == DownloadStatus.finished ||
+                i.status == DownloadStatus.skipped)
+            .length;
+        final activeCount = queue
+            .where((i) =>
+                i.status == DownloadStatus.downloading ||
+                i.status == DownloadStatus.searching ||
+                i.status == DownloadStatus.tagging)
+            .length;
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Очередь загрузок'),
+            actions: [
+              if (queue.isNotEmpty) ...[
+                if (queue.any((i) =>
+                    i.status == DownloadStatus.failed ||
+                    i.status == DownloadStatus.cancelled))
+                  IconButton(
+                    tooltip: 'Повторить все ошибки',
+                    icon: const Icon(Icons.refresh, color: SpotifyTheme.spotifyGreen),
+                    onPressed: () => downloadManager.retryFailed(),
+                  ),
+                IconButton(
+                  tooltip: 'Очистить завершенные',
+                  icon: const Icon(Icons.cleaning_services_outlined),
+                  onPressed: () => downloadManager.clearCompleted(),
+                ),
+                IconButton(
+                  tooltip: 'Отменить все',
+                  icon: const Icon(Icons.cancel_outlined, color: SpotifyTheme.error),
+                  onPressed: () {
+                    showDialog(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        backgroundColor: SpotifyTheme.surface,
+                        title: const Text('Отменить загрузки?'),
+                        content: const Text(
+                          'Все незавершенные загрузки в очереди будут остановлены.',
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('Назад'),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              downloadManager.cancelAll();
+                              Navigator.pop(ctx);
+                            },
+                            child: const Text(
+                              'Отменить все',
+                              style: TextStyle(color: SpotifyTheme.error),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ],
+          ),
+          body: queue.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: SpotifyTheme.surface,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.download_done,
+                          color: SpotifyTheme.textSecondary,
+                          size: 48,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Очередь загрузок пуста',
+                        style: TextStyle(
+                          color: SpotifyTheme.textPrimary,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Добавьте треки или плейлист на главном экране',
+                        style: TextStyle(
+                          color: SpotifyTheme.textSecondary,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : Column(
+                  children: [
+                    // Status Summary Bar
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      color: SpotifyTheme.surface,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              if (activeCount > 0) ...[
+                                const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: SpotifyTheme.spotifyGreen,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Активно: $activeCount',
+                                  style: const TextStyle(
+                                    color: SpotifyTheme.spotifyGreen,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ] else ...[
+                                const Icon(
+                                  Icons.check_circle_outline,
+                                  color: SpotifyTheme.spotifyGreen,
+                                  size: 16,
+                                ),
+                                const SizedBox(width: 6),
+                                const Text(
+                                  'Очередь завершена',
+                                  style: TextStyle(
+                                    color: SpotifyTheme.textSecondary,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                          Text(
+                            'Готово: $finishedCount из ${queue.length}',
+                            style: const TextStyle(
+                              color: SpotifyTheme.textSecondary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Items list
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: queue.length,
+                        itemBuilder: (context, index) {
+                          final item = queue[index];
+                          return DownloadProgressBar(
+                            item: item,
+                            onRetry: () => downloadManager.retryTrack(item.track),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+        );
+      },
+    );
+  }
+}
+
+
+// ==================== mobile\lib\ui\screens\settings_screen.dart ====================
+import 'package:flutter/material.dart';
+import '../../core/constants/app_constants.dart';
+import '../../core/downloader/audio_download_manager.dart';
+import '../theme/spotify_theme.dart';
+
+class SettingsScreen extends StatefulWidget {
+  final AudioDownloadManager downloadManager;
+
+  const SettingsScreen({Key? key, required this.downloadManager})
+      : super(key: key);
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  late int _concurrency;
+
+  @override
+  void initState() {
+    super.initState();
+    _concurrency = widget.downloadManager.maxConcurrency;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Настройки'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        children: [
+          // Storage Section
+          _buildSectionHeader('Хранилище'),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: SpotifyTheme.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Text(
+                  'Папка сохранения',
+                  style: TextStyle(
+                    color: SpotifyTheme.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  '/storage/emulated/0/Music/SpotiPars',
+                  style: TextStyle(
+                    color: SpotifyTheme.spotifyGreen,
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  'Треки автоматически индексируются в MediaStore и сразу видны в системных плеерах (Poweramp, YouTube Music, AIMP).',
+                  style: TextStyle(
+                    color: SpotifyTheme.textSecondary,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // Download Engine Section
+          _buildSectionHeader('Параллельные загрузки'),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: SpotifyTheme.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Потоков одновременно:',
+                      style: TextStyle(
+                        color: SpotifyTheme.textPrimary,
+                        fontSize: 14,
+                      ),
+                    ),
+                    Text(
+                      '$_concurrency',
+                      style: const TextStyle(
+                        color: SpotifyTheme.spotifyGreen,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                Slider(
+                  value: _concurrency.toDouble(),
+                  min: 1,
+                  max: 4,
+                  divisions: 3,
+                  activeColor: SpotifyTheme.spotifyGreen,
+                  inactiveColor: SpotifyTheme.surfaceElevated,
+                  onChanged: (val) {
+                    final newVal = val.round();
+                    setState(() => _concurrency = newVal);
+                    widget.downloadManager.configure(maxConcurrency: newVal);
+                  },
+                ),
+                const Text(
+                  'Рекомендуется 1 поток для стабильной мобильной загрузки без блокировок YouTube (особенно при работе через VPN).',
+                  style: TextStyle(
+                    color: SpotifyTheme.textSecondary,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // Search Engine Features Section
+          _buildSectionHeader('Каскадный поиск и обход защиты'),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: SpotifyTheme.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: const [
+                Text(
+                  '✓ Lyrics Cascade Priority',
+                  style: TextStyle(
+                    color: SpotifyTheme.spotifyGreen,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Автоматический поиск lyrics-версий со 100% студийным оригиналом звука, полностью обходящий блокировки YouTube Topic и PO-Token DRM.',
+                  style: TextStyle(
+                    color: SpotifyTheme.textSecondary,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+                SizedBox(height: 10),
+                Text(
+                  '✓ Фильтр аудиозаглушек (< 500 КБ)',
+                  style: TextStyle(
+                    color: SpotifyTheme.spotifyGreen,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Автоматическое отсечение 30-секундных превью и битых файлов.',
+                  style: TextStyle(
+                    color: SpotifyTheme.textSecondary,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // About Section
+          _buildSectionHeader('О приложении'),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: SpotifyTheme.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: SpotifyTheme.spotifyGreen,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.music_note,
+                        color: Colors.black,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: const [
+                        Text(
+                          '${AppConstants.appName} Mobile',
+                          style: TextStyle(
+                            color: SpotifyTheme.textPrimary,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                          ),
+                        ),
+                        Text(
+                          'Версия ${AppConstants.appVersion}',
+                          style: TextStyle(
+                            color: SpotifyTheme.textSecondary,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Быстрый бессерверный загрузчик музыки из Spotify для Android. Разработано автономно на базе архитектурной спецификации SpotiPars.',
+                  style: TextStyle(
+                    color: SpotifyTheme.textSecondary,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8, left: 4),
+      child: Text(
+        title,
+        style: const TextStyle(
+          color: SpotifyTheme.textSecondary,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.5,
+        ),
+      ),
+    );
+  }
+}
+
+
+// ==================== mobile\lib\ui\theme\spotify_theme.dart ====================
+import 'package:flutter/material.dart';
+
+class SpotifyTheme {
+  static const Color background = Color(0xFF121212);
+  static const Color surface = Color(0xFF181818);
+  static const Color surfaceElevated = Color(0xFF242424);
+  static const Color cardColor = Color(0xFF1F1F1F);
+  static const Color borderColor = Color(0xFF2E2E2E);
+
+  static const Color spotifyGreen = Color(0xFF1DB954);
+  static const Color spotifyGreenLight = Color(0xFF1ED760);
+  static const Color textPrimary = Color(0xFFFFFFFF);
+  static const Color textSecondary = Color(0xFFB3B3B3);
+  static const Color error = Color(0xFFE91429);
+  static const Color warning = Color(0xFFFFA000);
+
+  static ThemeData get darkTheme {
+    return ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: background,
+      primaryColor: spotifyGreen,
+      colorScheme: const ColorScheme.dark(
+        primary: spotifyGreen,
+        secondary: spotifyGreenLight,
+        surface: surface,
+        background: background,
+        error: error,
+      ),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: background,
+        foregroundColor: textPrimary,
+        elevation: 0,
+        centerTitle: false,
+        titleTextStyle: TextStyle(
+          color: textPrimary,
+          fontSize: 20,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      cardTheme: CardThemeData(
+        color: surface,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: const BorderSide(color: borderColor, width: 0.5),
+        ),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: spotifyGreen,
+          foregroundColor: Colors.black,
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          textStyle: const TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: surfaceElevated,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: spotifyGreen, width: 1.5),
+        ),
+        hintStyle: const TextStyle(color: textSecondary, fontSize: 14),
+      ),
+      navigationBarTheme: NavigationBarThemeData(
+        backgroundColor: surface,
+        indicatorColor: spotifyGreen.withOpacity(0.2),
+        labelTextStyle: MaterialStateProperty.resolveWith((states) {
+          if (states.contains(MaterialState.selected)) {
+            return const TextStyle(
+              color: spotifyGreen,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            );
+          }
+          return const TextStyle(color: textSecondary, fontSize: 12);
+        }),
+        iconTheme: MaterialStateProperty.resolveWith((states) {
+          if (states.contains(MaterialState.selected)) {
+            return const IconThemeData(color: spotifyGreen);
+          }
+          return const IconThemeData(color: textSecondary);
+        }),
+      ),
+    );
+  }
+}
+
+
+// ==================== mobile\lib\ui\widgets\download_progress_bar.dart ====================
+import 'package:flutter/material.dart';
+import '../../core/models/download_item.dart';
+import '../theme/spotify_theme.dart';
+
+class DownloadProgressBar extends StatelessWidget {
+  final DownloadItem item;
+  final VoidCallback? onRetry;
+
+  const DownloadProgressBar({
+    Key? key,
+    required this.item,
+    this.onRetry,
+  }) : super(key: key);
+
+  void _showErrorDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: SpotifyTheme.surface,
+        title: Row(
+          children: const [
+            Icon(Icons.info_outline, color: SpotifyTheme.error, size: 22),
+            SizedBox(width: 8),
+            Text('Диагностика загрузки', style: TextStyle(fontSize: 16)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${item.track.artist} — ${item.track.title}',
+              style: const TextStyle(
+                color: SpotifyTheme.textPrimary,
+                fontWeight: FontWeight.bold,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Статус: ${item.statusMessage}',
+              style: const TextStyle(color: SpotifyTheme.textSecondary, fontSize: 13),
+            ),
+            if (item.error != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: SpotifyTheme.surfaceElevated,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: SpotifyTheme.borderColor, width: 0.5),
+                ),
+                child: SelectableText(
+                  item.error!,
+                  style: const TextStyle(
+                    color: SpotifyTheme.error,
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            const Text(
+              'Если загрузка не удалась, это может быть вызвано ограничением YouTube или отсутствием связи.',
+              style: TextStyle(color: SpotifyTheme.textSecondary, fontSize: 11),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Закрыть'),
+          ),
+          if (onRetry != null &&
+              (item.status == DownloadStatus.failed ||
+                  item.status == DownloadStatus.cancelled))
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                onRetry!();
+              },
+              child: const Text('Повторить'),
+            ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      decoration: BoxDecoration(
+        color: SpotifyTheme.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: _borderColorForStatus(item.status),
+          width: 0.8,
+        ),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => _showErrorDialog(context),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  // Cover
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: item.track.coverUrl.isNotEmpty
+                        ? Image.network(
+                            item.track.coverUrl,
+                            width: 42,
+                            height: 42,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => _fallbackCover(),
+                          )
+                        : _fallbackCover(),
+                  ),
+                  const SizedBox(width: 12),
+
+                  // Title & Artist
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          item.track.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: SpotifyTheme.textPrimary,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          item.track.artist,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: SpotifyTheme.textSecondary,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(width: 8),
+
+                  // Status Badge
+                  _buildStatusBadge(item.status),
+                ],
+              ),
+
+              const SizedBox(height: 10),
+
+              // Progress indicator & status message
+              Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: item.progress > 0 ? item.progress : null,
+                        minHeight: 5,
+                        backgroundColor: SpotifyTheme.surfaceElevated,
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          _progressColorForStatus(item.status),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    '${(item.progress * 100).toInt()}%',
+                    style: const TextStyle(
+                      color: SpotifyTheme.textSecondary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 6),
+
+              // Detailed Status Text
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      item.statusMessage,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _textColorForStatus(item.status),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                  if (item.status == DownloadStatus.failed)
+                    const Text(
+                      'Нажмите для деталей',
+                      style: TextStyle(color: SpotifyTheme.warning, fontSize: 10),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusBadge(DownloadStatus status) {
+    String label;
+    Color bg;
+    Color fg;
+
+    switch (status) {
+      case DownloadStatus.queued:
+        label = 'В очереди';
+        bg = SpotifyTheme.surfaceElevated;
+        fg = SpotifyTheme.textSecondary;
+        break;
+      case DownloadStatus.searching:
+        label = 'Поиск';
+        bg = Colors.amber.withOpacity(0.2);
+        fg = Colors.amberAccent;
+        break;
+      case DownloadStatus.downloading:
+        label = 'Скачивание';
+        bg = Colors.blue.withOpacity(0.2);
+        fg = Colors.lightBlueAccent;
+        break;
+      case DownloadStatus.tagging:
+        label = 'Тегирование';
+        bg = Colors.purple.withOpacity(0.2);
+        fg = Colors.purpleAccent;
+        break;
+      case DownloadStatus.finished:
+        label = 'Готово';
+        bg = SpotifyTheme.spotifyGreen.withOpacity(0.2);
+        fg = SpotifyTheme.spotifyGreen;
+        break;
+      case DownloadStatus.skipped:
+        label = 'Пропущен';
+        bg = Colors.grey.withOpacity(0.2);
+        fg = Colors.white70;
+        break;
+      case DownloadStatus.failed:
+        label = 'Ошибка';
+        bg = SpotifyTheme.error.withOpacity(0.2);
+        fg = SpotifyTheme.error;
+        break;
+      case DownloadStatus.cancelled:
+        label = 'Отменено';
+        bg = Colors.grey.withOpacity(0.2);
+        fg = Colors.white60;
+        break;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: fg,
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  Color _borderColorForStatus(DownloadStatus status) {
+    if (status == DownloadStatus.finished) {
+      return SpotifyTheme.spotifyGreen.withOpacity(0.3);
+    }
+    if (status == DownloadStatus.failed) {
+      return SpotifyTheme.error.withOpacity(0.3);
+    }
+    return SpotifyTheme.borderColor;
+  }
+
+  Color _progressColorForStatus(DownloadStatus status) {
+    if (status == DownloadStatus.finished) return SpotifyTheme.spotifyGreen;
+    if (status == DownloadStatus.failed) return SpotifyTheme.error;
+    if (status == DownloadStatus.skipped) return Colors.grey;
+    return SpotifyTheme.spotifyGreen;
+  }
+
+  Color _textColorForStatus(DownloadStatus status) {
+    if (status == DownloadStatus.failed) return SpotifyTheme.error;
+    if (status == DownloadStatus.finished) return SpotifyTheme.spotifyGreen;
+    return SpotifyTheme.textSecondary;
+  }
+
+  Widget _fallbackCover() {
+    return Container(
+      width: 42,
+      height: 42,
+      color: SpotifyTheme.surfaceElevated,
+      child: const Icon(
+        Icons.music_note,
+        color: SpotifyTheme.textSecondary,
+        size: 20,
+      ),
+    );
+  }
+}
+
+
+// ==================== mobile\lib\ui\widgets\format_selector_chips.dart ====================
+import 'package:flutter/material.dart';
+import '../../core/constants/app_constants.dart';
+import '../theme/spotify_theme.dart';
+
+class FormatSelectorChips extends StatelessWidget {
+  final String selectedFormat;
+  final ValueChanged<String> onFormatChanged;
+
+  const FormatSelectorChips({
+    Key? key,
+    required this.selectedFormat,
+    required this.onFormatChanged,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        _buildChip(
+          label: 'MP3 (320 kbps)',
+          value: AppConstants.formatMp3,
+          badge: 'Рекомендуется',
+        ),
+        const SizedBox(width: 12),
+        _buildChip(
+          label: 'FLAC (Lossless)',
+          value: AppConstants.formatFlac,
+          badge: 'Hi-Fi',
+        ),
+      ],
+    );
+  }
+
+  Widget _buildChip({
+    required String label,
+    required String value,
+    required String badge,
+  }) {
+    final isSelected = selectedFormat == value;
+
+    return Expanded(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => onFormatChanged(value),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? SpotifyTheme.spotifyGreen.withOpacity(0.15)
+                : SpotifyTheme.surfaceElevated,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isSelected
+                  ? SpotifyTheme.spotifyGreen
+                  : SpotifyTheme.borderColor,
+              width: isSelected ? 1.5 : 1.0,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    label,
+                    style: TextStyle(
+                      color: isSelected
+                          ? SpotifyTheme.textPrimary
+                          : SpotifyTheme.textSecondary,
+                      fontSize: 13,
+                      fontWeight:
+                          isSelected ? FontWeight.bold : FontWeight.w500,
+                    ),
+                  ),
+                  if (isSelected)
+                    const Icon(
+                      Icons.check_circle,
+                      color: SpotifyTheme.spotifyGreen,
+                      size: 16,
+                    ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? SpotifyTheme.spotifyGreen.withOpacity(0.25)
+                      : Colors.white10,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  badge,
+                  style: TextStyle(
+                    color: isSelected
+                        ? SpotifyTheme.spotifyGreen
+                        : SpotifyTheme.textSecondary,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
+// ==================== mobile\lib\ui\widgets\track_list_tile.dart ====================
+import 'package:flutter/material.dart';
+import '../../core/models/track_item.dart';
+import '../theme/spotify_theme.dart';
+
+class TrackListTile extends StatelessWidget {
+  final TrackItem track;
+  final ValueChanged<bool>? onToggleSelect;
+
+  const TrackListTile({
+    Key? key,
+    required this.track,
+    this.onToggleSelect,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: SpotifyTheme.surface,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          // Select Checkbox
+          if (onToggleSelect != null)
+            Checkbox(
+              value: track.isSelected,
+              activeColor: SpotifyTheme.spotifyGreen,
+              checkColor: Colors.black,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(4),
+              ),
+              onChanged: (val) {
+                if (val != null) onToggleSelect!(val);
+              },
+            )
+          else
+            SizedBox(
+              width: 32,
+              child: Text(
+                '${track.trackNumber}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: SpotifyTheme.textSecondary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+
+          const SizedBox(width: 8),
+
+          // Cover Art Thumbnail
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: track.coverUrl.isNotEmpty
+                ? Image.network(
+                    track.coverUrl,
+                    width: 44,
+                    height: 44,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) =>
+                        _placeholderCover(),
+                  )
+                : _placeholderCover(),
+          ),
+
+          const SizedBox(width: 12),
+
+          // Title & Artist
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  track.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: SpotifyTheme.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  track.artist,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: SpotifyTheme.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(width: 8),
+
+          // Duration
+          Text(
+            track.durationFormatted,
+            style: const TextStyle(
+              color: SpotifyTheme.textSecondary,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _placeholderCover() {
+    return Container(
+      width: 44,
+      height: 44,
+      color: SpotifyTheme.surfaceElevated,
+      child: const Icon(
+        Icons.music_note,
+        color: SpotifyTheme.textSecondary,
+        size: 24,
+      ),
+    );
+  }
+}
+
+

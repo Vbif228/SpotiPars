@@ -7,18 +7,13 @@ import 'track_title_cleaner.dart';
 class YouTubeMatchResult {
   final Video video;
   final StreamInfo streamInfo;
-  final List<StreamInfo> fallbackStreams;
   final String queryUsed;
 
   const YouTubeMatchResult({
     required this.video,
     required this.streamInfo,
-    this.fallbackStreams = const [],
     required this.queryUsed,
   });
-
-  /// All stream candidates for this video (muxed itag 18 prioritized for 403 bypass, followed by direct audio)
-  List<StreamInfo> get allStreams => [streamInfo, ...fallbackStreams];
 }
 
 class YouTubeSearchEngine {
@@ -30,32 +25,19 @@ class YouTubeSearchEngine {
     _yt = yt;
   }
 
-  /// Validates that a stream is directly downloadable and not an HLS/m3u8 playlist stub.
-  bool _isValidDirectStream(StreamInfo stream) {
-    if (stream is HlsStreamInfo) return false;
-    final containerName = stream.container.name.toLowerCase();
-    if (containerName.contains('m3u8') || containerName.contains('hls')) {
-      return false;
-    }
-    if (stream.size.totalBytes < AppConstants.minValidAudioBytes) {
-      return false;
-    }
-    return true;
-  }
-
   /// Executes cascade search on YouTube and returns the best valid audio stream.
   Future<YouTubeMatchResult?> findBestAudioStream(
     TrackItem track, {
     void Function(String message)? onStatusUpdate,
-    Set<String>? excludedVideoIds,
   }) async {
     final cleanTitle = TrackTitleCleaner.cleanTrackTitle(track.title);
     final artist = track.artist;
 
     // Prioritized search queries:
     // 1. Lyrics query: user uploads, no YouTube Topic DRM / PO-Token restriction, original audio
-    // 2. Audio query
-    // 3. Artist + song
+    // 2. Official audio query
+    // 3. Audio query
+    // 4. Artist + song
     final queries = [
       '$artist - $cleanTitle lyrics',
       '$artist - $cleanTitle official audio',
@@ -67,9 +49,7 @@ class YouTubeSearchEngine {
       queries.add('$artist - ${track.title}');
     }
 
-    final visitedVideoIds = <String>{
-      if (excludedVideoIds != null) ...excludedVideoIds,
-    };
+    final visitedVideoIds = <String>{};
 
     for (int qIdx = 0; qIdx < queries.length; qIdx++) {
       final query = queries[qIdx];
@@ -115,42 +95,41 @@ class YouTubeSearchEngine {
                 .getManifest(video.id)
                 .timeout(const Duration(seconds: 12));
 
-            // 1. Muxed streams (itag 18 AAC) are prioritized first because YouTube's
-            // adaptive audioOnly streams currently return HTTP 403 Forbidden without PO-Token.
-            // Muxed streams bypass 403 blocks and stream immediately.
-            final directMuxed = manifest.muxed
-                .where(_isValidDirectStream)
-                .toList()
-              ..sort((a, b) => b.bitrate.compareTo(a.bitrate));
-
-            // 2. Direct audioOnly streams (Opus 160k, AAC 128k) as alternatives
-            final directAudio = manifest.audioOnly
-                .where(_isValidDirectStream)
-                .toList()
-              ..sort((a, b) {
-                if (a.isThrottled != b.isThrottled) {
-                  return a.isThrottled ? 1 : -1;
-                }
-                return b.bitrate.compareTo(a.bitrate);
-              });
-
-            final candidateStreams = <StreamInfo>[...directMuxed, ...directAudio];
-
-            // Deduplicate streams by itag
-            final seenTags = <int>{};
-            final uniqueStreams = <StreamInfo>[];
-            for (final s in candidateStreams) {
-              if (seenTags.add(s.tag)) {
-                uniqueStreams.add(s);
+            // Filter out HLS/m3u8 stubs and small files (< 500 KB)
+            bool isValidStream(StreamInfo s) {
+              if (s is HlsAudioStreamInfo ||
+                  s is HlsMuxedStreamInfo ||
+                  s is HlsVideoStreamInfo) {
+                return false;
               }
+              final containerName = s.container.name.toLowerCase();
+              if (containerName.contains('m3u8') || containerName.contains('hls')) {
+                return false;
+              }
+              if (s.size.totalBytes < AppConstants.minValidAudioBytes) {
+                return false;
+              }
+              return true;
             }
 
-            if (uniqueStreams.isEmpty) continue;
+            final validMuxed = manifest.muxed.where(isValidStream);
+            final validAudioOnly = manifest.audioOnly.where(isValidStream);
+
+            // 1. Prioritize muxed streams (itag 18 AAC) because YouTube's adaptive
+            // audioOnly streams currently return HTTP 403 Forbidden without PO-Token.
+            // Muxed streams bypass 403 blocks and stream immediately.
+            StreamInfo? bestAudio;
+            if (validMuxed.isNotEmpty) {
+              bestAudio = validMuxed.withHighestBitrate();
+            } else if (validAudioOnly.isNotEmpty) {
+              bestAudio = validAudioOnly.withHighestBitrate();
+            }
+
+            if (bestAudio == null) continue;
 
             return YouTubeMatchResult(
               video: video,
-              streamInfo: uniqueStreams.first,
-              fallbackStreams: uniqueStreams.sublist(1),
+              streamInfo: bestAudio,
               queryUsed: query,
             );
           } on RequestLimitExceededException {
