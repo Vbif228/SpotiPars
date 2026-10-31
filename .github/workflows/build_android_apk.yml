@@ -66,9 +66,13 @@ jobs:
         working-directory: mobile
         run: flutter pub get
 
+      - name: Analyze Dart Code
+        working-directory: mobile
+        run: flutter analyze
+
       - name: Build Release APK
         working-directory: mobile
-        run: flutter build apk --release
+        run: flutter build apk --release --verbose
 
       - name: Prepare and Sign Standalone APK
         run: |

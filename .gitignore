@@ -44,4 +44,5 @@ Desktop.ini
 **/android/local.properties
 **/mobile/build/
 **/mobile/.dart_tool/
+*.zip
 
