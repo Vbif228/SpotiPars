@@ -12,6 +12,7 @@ import '../storage/media_store_helper.dart';
 import '../tagger/id3_tagger.dart';
 import '../youtube/track_title_cleaner.dart';
 import '../youtube/youtube_search_engine.dart';
+import '../../services/foreground_download_service.dart';
 
 typedef DownloadProgressCallback = void Function(List<DownloadItem> items);
 
@@ -95,11 +96,20 @@ class AudioDownloadManager extends ChangeNotifier {
     }
     _isProcessing = false;
     notifyListeners();
+    ForegroundDownloadService.stopForeground();
   }
 
   void clearCompleted() {
     _queue.removeWhere((item) => item.isCompleted);
     notifyListeners();
+    final hasActive = _queue.any((item) =>
+        item.status == DownloadStatus.queued ||
+        item.status == DownloadStatus.searching ||
+        item.status == DownloadStatus.downloading ||
+        item.status == DownloadStatus.tagging);
+    if (!hasActive) {
+      ForegroundDownloadService.stopForeground();
+    }
   }
 
   void retryTrack(TrackItem track) {
@@ -142,6 +152,14 @@ class AudioDownloadManager extends ChangeNotifier {
     _isCancelled = false;
 
     try {
+      final activeCount = _queue.where((item) => !item.isCompleted).length;
+      if (activeCount > 0) {
+        ForegroundDownloadService.startForeground(
+          title: 'SpotiPars: Загрузка музыки',
+          text: 'Осталось треков в очереди: $activeCount',
+        );
+      }
+
       while (!_isCancelled) {
         final activeDownloads = _queue
             .where((item) =>
@@ -182,6 +200,14 @@ class AudioDownloadManager extends ChangeNotifier {
     } finally {
       _isProcessing = false;
       notifyListeners();
+      final hasActive = _queue.any((item) =>
+          item.status == DownloadStatus.queued ||
+          item.status == DownloadStatus.searching ||
+          item.status == DownloadStatus.downloading ||
+          item.status == DownloadStatus.tagging);
+      if (!hasActive) {
+        ForegroundDownloadService.stopForeground();
+      }
     }
   }
 
@@ -209,6 +235,19 @@ class AudioDownloadManager extends ChangeNotifier {
           totalBytes: total,
         );
         notifyListeners();
+
+        if (status == DownloadStatus.downloading && progress != null) {
+          final percent = (progress * 100).toInt();
+          ForegroundDownloadService.updateProgress(
+            title: 'SpotiPars: ${track.artist} - ${track.title}',
+            text: 'Загрузка $percent%...',
+          );
+        } else if (status == DownloadStatus.tagging) {
+          ForegroundDownloadService.updateProgress(
+            title: 'SpotiPars: ${track.artist} - ${track.title}',
+            text: 'Вшивка тегов и сканирование...',
+          );
+        }
       }
     }
 
@@ -404,11 +443,19 @@ class AudioDownloadManager extends ChangeNotifier {
           }
 
           // 6. Move to Target Music Directory
+          final containerName = match.streamInfo.container.name.toLowerCase();
+          String targetExt = _audioFormat;
+          if (containerName == 'mp4' || containerName == 'm4a') {
+            targetExt = 'm4a';
+          } else if (containerName == 'webm') {
+            targetExt = 'opus';
+          }
+
           final finalFilename = TrackTitleCleaner.buildFilename(
             trackNumber: track.trackNumber,
             artist: track.artist,
             title: track.title,
-            ext: _audioFormat,
+            ext: targetExt,
             includeNumber: true,
             totalTracks: _queue.length,
           );
@@ -421,6 +468,9 @@ class AudioDownloadManager extends ChangeNotifier {
           if (await localTemp.exists()) {
             await localTemp.delete();
           }
+
+          // Scan file into MediaStore so Samsung Music and native players index it immediately
+          await MediaStoreHelper.scanAudioFile(finalTargetFile);
 
           updateStatus(
             status: DownloadStatus.finished,

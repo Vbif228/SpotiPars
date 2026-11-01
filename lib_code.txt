@@ -22,6 +22,7 @@
         android:label="SpotiPars"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:usesCleartextTraffic="true"
         android:requestLegacyExternalStorage="true">
 
@@ -306,6 +307,7 @@ import '../storage/media_store_helper.dart';
 import '../tagger/id3_tagger.dart';
 import '../youtube/track_title_cleaner.dart';
 import '../youtube/youtube_search_engine.dart';
+import '../../services/foreground_download_service.dart';
 
 typedef DownloadProgressCallback = void Function(List<DownloadItem> items);
 
@@ -389,11 +391,20 @@ class AudioDownloadManager extends ChangeNotifier {
     }
     _isProcessing = false;
     notifyListeners();
+    ForegroundDownloadService.stopForeground();
   }
 
   void clearCompleted() {
     _queue.removeWhere((item) => item.isCompleted);
     notifyListeners();
+    final hasActive = _queue.any((item) =>
+        item.status == DownloadStatus.queued ||
+        item.status == DownloadStatus.searching ||
+        item.status == DownloadStatus.downloading ||
+        item.status == DownloadStatus.tagging);
+    if (!hasActive) {
+      ForegroundDownloadService.stopForeground();
+    }
   }
 
   void retryTrack(TrackItem track) {
@@ -436,6 +447,14 @@ class AudioDownloadManager extends ChangeNotifier {
     _isCancelled = false;
 
     try {
+      final activeCount = _queue.where((item) => !item.isCompleted).length;
+      if (activeCount > 0) {
+        ForegroundDownloadService.startForeground(
+          title: 'SpotiPars: Загрузка музыки',
+          text: 'Осталось треков в очереди: $activeCount',
+        );
+      }
+
       while (!_isCancelled) {
         final activeDownloads = _queue
             .where((item) =>
@@ -476,6 +495,14 @@ class AudioDownloadManager extends ChangeNotifier {
     } finally {
       _isProcessing = false;
       notifyListeners();
+      final hasActive = _queue.any((item) =>
+          item.status == DownloadStatus.queued ||
+          item.status == DownloadStatus.searching ||
+          item.status == DownloadStatus.downloading ||
+          item.status == DownloadStatus.tagging);
+      if (!hasActive) {
+        ForegroundDownloadService.stopForeground();
+      }
     }
   }
 
@@ -503,6 +530,19 @@ class AudioDownloadManager extends ChangeNotifier {
           totalBytes: total,
         );
         notifyListeners();
+
+        if (status == DownloadStatus.downloading && progress != null) {
+          final percent = (progress * 100).toInt();
+          ForegroundDownloadService.updateProgress(
+            title: 'SpotiPars: ${track.artist} - ${track.title}',
+            text: 'Загрузка $percent%...',
+          );
+        } else if (status == DownloadStatus.tagging) {
+          ForegroundDownloadService.updateProgress(
+            title: 'SpotiPars: ${track.artist} - ${track.title}',
+            text: 'Вшивка тегов и сканирование...',
+          );
+        }
       }
     }
 
@@ -698,11 +738,19 @@ class AudioDownloadManager extends ChangeNotifier {
           }
 
           // 6. Move to Target Music Directory
+          final containerName = match.streamInfo.container.name.toLowerCase();
+          String targetExt = _audioFormat;
+          if (containerName == 'mp4' || containerName == 'm4a') {
+            targetExt = 'm4a';
+          } else if (containerName == 'webm') {
+            targetExt = 'opus';
+          }
+
           final finalFilename = TrackTitleCleaner.buildFilename(
             trackNumber: track.trackNumber,
             artist: track.artist,
             title: track.title,
-            ext: _audioFormat,
+            ext: targetExt,
             includeNumber: true,
             totalTracks: _queue.length,
           );
@@ -715,6 +763,9 @@ class AudioDownloadManager extends ChangeNotifier {
           if (await localTemp.exists()) {
             await localTemp.delete();
           }
+
+          // Scan file into MediaStore so Samsung Music and native players index it immediately
+          await MediaStoreHelper.scanAudioFile(finalTargetFile);
 
           updateStatus(
             status: DownloadStatus.finished,
@@ -1398,33 +1449,81 @@ class SpotifyScraper {
 
 
 // ==================== mobile\lib\core\storage\media_store_helper.dart ====================
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../constants/app_constants.dart';
 import '../youtube/track_title_cleaner.dart';
 
 class MediaStoreHelper {
+  static const MethodChannel _mediaScannerChannel =
+      MethodChannel('com.vbif228.spotipars/media_scanner');
+
+  static const String defaultMusicPath = '/storage/emulated/0/Music/SpotiPars';
+  static const List<String> folderPresets = [
+    '/storage/emulated/0/Music/SpotiPars',
+    '/storage/emulated/0/Music',
+    '/storage/emulated/0/Download/SpotiPars',
+    '/storage/emulated/0/Download',
+  ];
+
+  static String? _cachedBasePath;
+
+  /// Loads the persisted custom base directory from local settings,
+  /// or returns the standard default Music/SpotiPars folder.
+  static Future<String> getMusicBasePath() async {
+    if (_cachedBasePath != null) return _cachedBasePath!;
+
+    try {
+      final docDir = await getApplicationDocumentsDirectory();
+      final settingsFile = File(p.join(docDir.path, 'storage_settings.json'));
+      if (await settingsFile.exists()) {
+        final content = await settingsFile.readAsString();
+        final data = json.decode(content);
+        if (data is Map && data['basePath'] is String) {
+          final saved = data['basePath'] as String;
+          if (saved.isNotEmpty) {
+            _cachedBasePath = saved;
+            return saved;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error reading storage settings: $e');
+    }
+
+    _cachedBasePath = defaultMusicPath;
+    return defaultMusicPath;
+  }
+
+  /// Sets and persists a custom music base directory.
+  static Future<void> setMusicBasePath(String path) async {
+    _cachedBasePath = path;
+    try {
+      final docDir = await getApplicationDocumentsDirectory();
+      final settingsFile = File(p.join(docDir.path, 'storage_settings.json'));
+      final data = {'basePath': path};
+      await settingsFile.writeAsString(json.encode(data), flush: true);
+    } catch (e) {
+      debugPrint('Error saving storage settings: $e');
+    }
+  }
+
   /// Resolves the target directory for downloaded tracks.
-  /// On Android, attempts to write to `/storage/emulated/0/Music/SpotiPars`,
-  /// with a graceful fallback to external app storage if system permissions restrict it.
   static Future<Directory> getMusicDirectory({String subFolder = ''}) async {
+    final basePath = await getMusicBasePath();
     Directory baseDir;
 
     if (Platform.isAndroid) {
       try {
-        final standardMusicDir = Directory('/storage/emulated/0/Music');
-        if (await standardMusicDir.exists()) {
-          final spotiparsFolder = Directory(p.join(standardMusicDir.path, 'SpotiPars'));
-          if (!await spotiparsFolder.exists()) {
-            await spotiparsFolder.create(recursive: true);
-          }
-          baseDir = standardMusicDir;
-        } else {
-          final extDir = await getExternalStorageDirectory();
-          baseDir = extDir ?? await getApplicationDocumentsDirectory();
+        final targetDir = Directory(basePath);
+        if (!await targetDir.exists()) {
+          await targetDir.create(recursive: true);
         }
+        baseDir = targetDir;
       } catch (e) {
         debugPrint('Fallback storage used due to: $e');
         final extDir = await getExternalStorageDirectory();
@@ -1434,20 +1533,46 @@ class MediaStoreHelper {
       baseDir = await getApplicationDocumentsDirectory();
     }
 
-    String fullPath = p.join(baseDir.path, 'SpotiPars');
+    String fullPath = baseDir.path;
     if (subFolder.isNotEmpty) {
       final safeSub = TrackTitleCleaner.sanitizeFilename(subFolder, maxLength: 60);
       fullPath = p.join(fullPath, safeSub);
     }
 
-    final targetDir = Directory(fullPath);
-    if (!await targetDir.exists()) {
-      await targetDir.create(recursive: true);
+    final finalDir = Directory(fullPath);
+    if (!await finalDir.exists()) {
+      await finalDir.create(recursive: true);
     }
-    return targetDir;
+    return finalDir;
+  }
+
+  /// Scans an audio file into Android MediaStore so that Samsung Music,
+  /// Poweramp, YouTube Music, and other native media players detect it immediately.
+  static Future<void> scanAudioFile(File file, {String? mimeType}) async {
+    if (!Platform.isAndroid) return;
+    try {
+      final extension = p.extension(file.path).toLowerCase();
+      final resolvedMime = mimeType ??
+          (extension == '.m4a' || extension == '.mp4'
+              ? 'audio/mp4'
+              : extension == '.flac'
+                  ? 'audio/flac'
+                  : extension == '.opus' || extension == '.ogg'
+                      ? 'audio/ogg'
+                      : 'audio/mpeg');
+
+      await _mediaScannerChannel.invokeMethod('scanFile', {
+        'path': file.path,
+        'mimeType': resolvedMime,
+      });
+      debugPrint('MediaStore scanned: ${file.path} ($resolvedMime)');
+    } catch (e) {
+      debugPrint('MediaStore scan warning (non-fatal): $e');
+    }
   }
 
   /// Checks if track is already downloaded and valid in target directory.
+  /// Checks for both .m4a and .mp3 (and current ext) to avoid duplicates.
   static Future<File?> findExistingTrackFile({
     required Directory directory,
     required String artist,
@@ -1459,18 +1584,23 @@ class MediaStoreHelper {
     final safeArtist = TrackTitleCleaner.sanitizeFilename(artist, maxLength: 50).toLowerCase();
     final safeTitle = TrackTitleCleaner.sanitizeFilename(title, maxLength: 70).toLowerCase();
     final cleanExt = ext.replaceAll('.', '').toLowerCase();
-    final targetSuffix = '$safeArtist - $safeTitle.$cleanExt';
+
+    // Check primary requested extension, plus standard .m4a / .mp3 alternatives
+    final candidateExtensions = {cleanExt, 'm4a', 'mp3', 'flac'};
 
     try {
       final entities = directory.listSync();
       for (final entity in entities) {
         if (entity is File) {
           final filename = p.basename(entity.path).toLowerCase();
-          if (filename.endsWith(targetSuffix) ||
-              filename == '$safeArtist - $safeTitle.$cleanExt') {
-            final length = await entity.length();
-            if (length > AppConstants.minExistingFileSize) {
-              return entity;
+          for (final cExt in candidateExtensions) {
+            final targetSuffix = '$safeArtist - $safeTitle.$cExt';
+            if (filename.endsWith(targetSuffix) ||
+                filename == targetSuffix) {
+              final length = await entity.length();
+              if (length > AppConstants.minExistingFileSize) {
+                return entity;
+              }
             }
           }
         }
@@ -2968,6 +3098,7 @@ class QueueScreen extends StatelessWidget {
 import 'package:flutter/material.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/downloader/audio_download_manager.dart';
+import '../../core/storage/media_store_helper.dart';
 import '../theme/spotify_theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -2982,11 +3113,172 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late int _concurrency;
+  String _currentFolderPath = MediaStoreHelper.defaultMusicPath;
 
   @override
   void initState() {
     super.initState();
     _concurrency = widget.downloadManager.maxConcurrency;
+    _loadCurrentFolder();
+  }
+
+  Future<void> _loadCurrentFolder() async {
+    final folder = await MediaStoreHelper.getMusicBasePath();
+    if (mounted) {
+      setState(() {
+        _currentFolderPath = folder;
+      });
+    }
+  }
+
+  void _showFolderPickerDialog() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: SpotifyTheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Text(
+                    'Выберите папку для сохранения музыки',
+                    style: TextStyle(
+                      color: SpotifyTheme.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                ...MediaStoreHelper.folderPresets.map((preset) {
+                  final isSelected = _currentFolderPath == preset;
+                  String label = preset;
+                  if (preset == '/storage/emulated/0/Music/SpotiPars') {
+                    label = 'Music/SpotiPars (По умолчанию)';
+                  } else if (preset == '/storage/emulated/0/Music') {
+                    label = 'Music (Общая системная папка)';
+                  } else if (preset == '/storage/emulated/0/Download/SpotiPars') {
+                    label = 'Download/SpotiPars (Папка Загрузки)';
+                  } else if (preset == '/storage/emulated/0/Download') {
+                    label = 'Download (Общая папка Загрузок)';
+                  }
+
+                  return ListTile(
+                    dense: true,
+                    leading: Icon(
+                      isSelected ? Icons.check_circle : Icons.folder_outlined,
+                      color: isSelected
+                          ? SpotifyTheme.spotifyGreen
+                          : SpotifyTheme.textSecondary,
+                    ),
+                    title: Text(
+                      label,
+                      style: TextStyle(
+                        color: isSelected
+                            ? SpotifyTheme.spotifyGreen
+                            : SpotifyTheme.textPrimary,
+                        fontWeight:
+                            isSelected ? FontWeight.bold : FontWeight.normal,
+                        fontSize: 13,
+                      ),
+                    ),
+                    subtitle: Text(
+                      preset,
+                      style: const TextStyle(
+                        color: SpotifyTheme.textSecondary,
+                        fontSize: 11,
+                      ),
+                    ),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      await MediaStoreHelper.setMusicBasePath(preset);
+                      setState(() => _currentFolderPath = preset);
+                    },
+                  );
+                }),
+                const Divider(color: SpotifyTheme.borderColor),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(
+                    Icons.edit_note,
+                    color: SpotifyTheme.spotifyGreen,
+                  ),
+                  title: const Text(
+                    'Указать другой путь...',
+                    style: TextStyle(
+                      color: SpotifyTheme.textPrimary,
+                      fontSize: 13,
+                    ),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showCustomPathDialog();
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showCustomPathDialog() {
+    final controller = TextEditingController(text: _currentFolderPath);
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: SpotifyTheme.surface,
+          title: const Text(
+            'Свой путь к папке',
+            style: TextStyle(color: SpotifyTheme.textPrimary, fontSize: 16),
+          ),
+          content: TextField(
+            controller: controller,
+            style: const TextStyle(
+              color: SpotifyTheme.textPrimary,
+              fontSize: 13,
+              fontFamily: 'monospace',
+            ),
+            decoration: const InputDecoration(
+              hintText: '/storage/emulated/0/...',
+              hintStyle: TextStyle(color: SpotifyTheme.textSecondary),
+              enabledBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: SpotifyTheme.borderColor),
+              ),
+              focusedBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: SpotifyTheme.spotifyGreen),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Отмена', style: TextStyle(color: SpotifyTheme.textSecondary)),
+            ),
+            TextButton(
+              onPressed: () async {
+                final text = controller.text.trim();
+                if (text.isNotEmpty) {
+                  Navigator.pop(ctx);
+                  await MediaStoreHelper.setMusicBasePath(text);
+                  setState(() => _currentFolderPath = text);
+                }
+              },
+              child: const Text('Сохранить', style: TextStyle(color: SpotifyTheme.spotifyGreen)),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -3009,27 +3301,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
-                Text(
-                  'Папка сохранения',
-                  style: TextStyle(
-                    color: SpotifyTheme.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                  ),
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Папка сохранения',
+                      style: TextStyle(
+                        color: SpotifyTheme.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    TextButton.icon(
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      icon: const Icon(Icons.folder_open, size: 16, color: SpotifyTheme.spotifyGreen),
+                      label: const Text(
+                        'Изменить',
+                        style: TextStyle(color: SpotifyTheme.spotifyGreen, fontSize: 13),
+                      ),
+                      onPressed: _showFolderPickerDialog,
+                    ),
+                  ],
                 ),
-                SizedBox(height: 4),
+                const SizedBox(height: 4),
                 Text(
-                  '/storage/emulated/0/Music/SpotiPars',
-                  style: TextStyle(
+                  _currentFolderPath,
+                  style: const TextStyle(
                     color: SpotifyTheme.spotifyGreen,
                     fontSize: 12,
                     fontFamily: 'monospace',
                   ),
                 ),
-                SizedBox(height: 6),
-                Text(
-                  'Треки автоматически индексируются в MediaStore и сразу видны в системных плеерах (Poweramp, YouTube Music, AIMP).',
+                const SizedBox(height: 6),
+                const Text(
+                  'Треки автоматически индексируются в MediaStore и сразу видны в системных плеерах (Samsung Music, Poweramp, YouTube Music, AIMP).',
                   style: TextStyle(
                     color: SpotifyTheme.textSecondary,
                     fontSize: 11,

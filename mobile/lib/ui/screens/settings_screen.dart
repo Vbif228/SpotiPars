@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/downloader/audio_download_manager.dart';
+import '../../core/storage/media_store_helper.dart';
 import '../theme/spotify_theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -15,11 +16,172 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late int _concurrency;
+  String _currentFolderPath = MediaStoreHelper.defaultMusicPath;
 
   @override
   void initState() {
     super.initState();
     _concurrency = widget.downloadManager.maxConcurrency;
+    _loadCurrentFolder();
+  }
+
+  Future<void> _loadCurrentFolder() async {
+    final folder = await MediaStoreHelper.getMusicBasePath();
+    if (mounted) {
+      setState(() {
+        _currentFolderPath = folder;
+      });
+    }
+  }
+
+  void _showFolderPickerDialog() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: SpotifyTheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Text(
+                    'Выберите папку для сохранения музыки',
+                    style: TextStyle(
+                      color: SpotifyTheme.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                ...MediaStoreHelper.folderPresets.map((preset) {
+                  final isSelected = _currentFolderPath == preset;
+                  String label = preset;
+                  if (preset == '/storage/emulated/0/Music/SpotiPars') {
+                    label = 'Music/SpotiPars (По умолчанию)';
+                  } else if (preset == '/storage/emulated/0/Music') {
+                    label = 'Music (Общая системная папка)';
+                  } else if (preset == '/storage/emulated/0/Download/SpotiPars') {
+                    label = 'Download/SpotiPars (Папка Загрузки)';
+                  } else if (preset == '/storage/emulated/0/Download') {
+                    label = 'Download (Общая папка Загрузок)';
+                  }
+
+                  return ListTile(
+                    dense: true,
+                    leading: Icon(
+                      isSelected ? Icons.check_circle : Icons.folder_outlined,
+                      color: isSelected
+                          ? SpotifyTheme.spotifyGreen
+                          : SpotifyTheme.textSecondary,
+                    ),
+                    title: Text(
+                      label,
+                      style: TextStyle(
+                        color: isSelected
+                            ? SpotifyTheme.spotifyGreen
+                            : SpotifyTheme.textPrimary,
+                        fontWeight:
+                            isSelected ? FontWeight.bold : FontWeight.normal,
+                        fontSize: 13,
+                      ),
+                    ),
+                    subtitle: Text(
+                      preset,
+                      style: const TextStyle(
+                        color: SpotifyTheme.textSecondary,
+                        fontSize: 11,
+                      ),
+                    ),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      await MediaStoreHelper.setMusicBasePath(preset);
+                      setState(() => _currentFolderPath = preset);
+                    },
+                  );
+                }),
+                const Divider(color: SpotifyTheme.borderColor),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(
+                    Icons.edit_note,
+                    color: SpotifyTheme.spotifyGreen,
+                  ),
+                  title: const Text(
+                    'Указать другой путь...',
+                    style: TextStyle(
+                      color: SpotifyTheme.textPrimary,
+                      fontSize: 13,
+                    ),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showCustomPathDialog();
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showCustomPathDialog() {
+    final controller = TextEditingController(text: _currentFolderPath);
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: SpotifyTheme.surface,
+          title: const Text(
+            'Свой путь к папке',
+            style: TextStyle(color: SpotifyTheme.textPrimary, fontSize: 16),
+          ),
+          content: TextField(
+            controller: controller,
+            style: const TextStyle(
+              color: SpotifyTheme.textPrimary,
+              fontSize: 13,
+              fontFamily: 'monospace',
+            ),
+            decoration: const InputDecoration(
+              hintText: '/storage/emulated/0/...',
+              hintStyle: TextStyle(color: SpotifyTheme.textSecondary),
+              enabledBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: SpotifyTheme.borderColor),
+              ),
+              focusedBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: SpotifyTheme.spotifyGreen),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Отмена', style: TextStyle(color: SpotifyTheme.textSecondary)),
+            ),
+            TextButton(
+              onPressed: () async {
+                final text = controller.text.trim();
+                if (text.isNotEmpty) {
+                  Navigator.pop(ctx);
+                  await MediaStoreHelper.setMusicBasePath(text);
+                  setState(() => _currentFolderPath = text);
+                }
+              },
+              child: const Text('Сохранить', style: TextStyle(color: SpotifyTheme.spotifyGreen)),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -42,27 +204,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
-                Text(
-                  'Папка сохранения',
-                  style: TextStyle(
-                    color: SpotifyTheme.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                  ),
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Папка сохранения',
+                      style: TextStyle(
+                        color: SpotifyTheme.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    TextButton.icon(
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      icon: const Icon(Icons.folder_open, size: 16, color: SpotifyTheme.spotifyGreen),
+                      label: const Text(
+                        'Изменить',
+                        style: TextStyle(color: SpotifyTheme.spotifyGreen, fontSize: 13),
+                      ),
+                      onPressed: _showFolderPickerDialog,
+                    ),
+                  ],
                 ),
-                SizedBox(height: 4),
+                const SizedBox(height: 4),
                 Text(
-                  '/storage/emulated/0/Music/SpotiPars',
-                  style: TextStyle(
+                  _currentFolderPath,
+                  style: const TextStyle(
                     color: SpotifyTheme.spotifyGreen,
                     fontSize: 12,
                     fontFamily: 'monospace',
                   ),
                 ),
-                SizedBox(height: 6),
-                Text(
-                  'Треки автоматически индексируются в MediaStore и сразу видны в системных плеерах (Poweramp, YouTube Music, AIMP).',
+                const SizedBox(height: 6),
+                const Text(
+                  'Треки автоматически индексируются в MediaStore и сразу видны в системных плеерах (Samsung Music, Poweramp, YouTube Music, AIMP).',
                   style: TextStyle(
                     color: SpotifyTheme.textSecondary,
                     fontSize: 11,

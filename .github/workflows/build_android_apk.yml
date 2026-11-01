@@ -41,17 +41,11 @@ jobs:
       - name: Regenerate Native Android Project via Flutter
         working-directory: mobile
         run: |
-          mkdir -p /tmp/backup_manifest
-          cp android/app/src/main/AndroidManifest.xml /tmp/backup_manifest/AndroidManifest.xml
-          if [ -d "android/app/src/main/res/mipmap-hdpi" ]; then
-            cp -r android/app/src/main/res /tmp/backup_manifest/
-          fi
+          mkdir -p /tmp/backup_main
+          cp -r android/app/src/main/* /tmp/backup_main/
           rm -rf android
           flutter create . --platforms=android --org com.vbif228 --project-name spotipars
-          cp /tmp/backup_manifest/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
-          if [ -d "/tmp/backup_manifest/res" ]; then
-            cp -r /tmp/backup_manifest/res/* android/app/src/main/res/
-          fi
+          cp -r /tmp/backup_main/* android/app/src/main/
           python3 -c "
           import glob, re
           for p in glob.glob('android/app/build.gradle*'):
